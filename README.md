@@ -1,6 +1,6 @@
 # QuantAI — 多Agent A股投研助手
 
-基于 **Spring Boot + DeepSeek + Vue 3** 的个人投研辅助系统，通过多Agent协作分析 + 实时数据 + 自然语言交互，辅助股票投研决策。
+基于 **Spring Boot + DeepSeek + Vue 3 + python** 的个人投研辅助系统，通过多Agent协作分析 + 实时数据 + 自然语言交互，辅助股票投研决策。
 
 ## 架构
 
