@@ -36,6 +36,11 @@ const routes = [
     name: 'BoardDetail',
     component: () => import('../views/BoardDetail.vue'),
   },
+  {
+    path: '/watch',
+    name: 'WatchPage',
+    component: () => import('../views/WatchPage.vue'),
+  },
 ]
 
 const router = createRouter({

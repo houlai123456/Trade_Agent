@@ -5,6 +5,7 @@ import com.quantai.model.vo.AlertVO;
 import com.quantai.service.AlertService;
 import com.quantai.service.DataServiceClient;
 import com.quantai.service.StockService;
+import com.quantai.service.WatchService;
 import com.quantai.websocket.StockWebSocketHandler;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -24,6 +25,7 @@ public class StockScheduler implements CommandLineRunner {
     private final AlertService alertService;
     private final DataServiceClient dataServiceClient;
     private final StockWebSocketHandler webSocketHandler;
+    private final WatchService watchService;
 
     @Override
     public void run(String... args) {
@@ -77,6 +79,26 @@ public class StockScheduler implements CommandLineRunner {
             }
         } catch (Exception e) {
             log.error("定时检查异动失败", e);
+        }
+    }
+
+    @Scheduled(fixedRate = 10000)
+    public void checkWatchRules() {
+        if (!isTradingTime()) return;
+        try {
+            watchService.checkWatchRules();
+        } catch (Exception e) {
+            log.error("定时检查盯盘规则失败", e);
+        }
+    }
+
+    @Scheduled(fixedRate = 10000)
+    public void checkConditionOrders() {
+        if (!isTradingTime()) return;
+        try {
+            watchService.checkConditionOrders();
+        } catch (Exception e) {
+            log.error("定时检查条件单失败", e);
         }
     }
 

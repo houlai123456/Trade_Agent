@@ -49,6 +49,13 @@ spring:
           model: deepseek-chat
           temperature: 0.7
 
+# RAG 配置
+rag:
+  aliyun:
+    api-key: ${ALIYUN_API_KEY:}
+  qdrant:
+    url: http://localhost:6333
+
 # MyBatis-Plus配置
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml

@@ -124,3 +124,39 @@ CREATE TABLE IF NOT EXISTS alert_record (
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_create_time (create_time)
 );
+
+-- 盯盘规则
+CREATE TABLE IF NOT EXISTS watch_rule (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL DEFAULT 1,
+    code VARCHAR(20) NOT NULL,
+    name VARCHAR(100),
+    condition_type VARCHAR(10) NOT NULL COMMENT 'ABOVE-高于 BELOW-低于',
+    target_price DECIMAL(10, 2) NOT NULL,
+    enabled INT DEFAULT 1,
+    last_triggered_time TIMESTAMP,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_user_id (user_id),
+    INDEX idx_code (code)
+);
+
+-- 条件单
+CREATE TABLE IF NOT EXISTS condition_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL DEFAULT 1,
+    code VARCHAR(20) NOT NULL,
+    name VARCHAR(100),
+    direction VARCHAR(10) NOT NULL COMMENT 'BUY-买入 SELL-卖出',
+    condition_type VARCHAR(10) NOT NULL COMMENT 'ABOVE-高于 BELOW-低于',
+    trigger_price DECIMAL(10, 2) NOT NULL,
+    quantity INT NOT NULL,
+    order_price DECIMAL(10, 2) COMMENT '限价(null=市价)',
+    status VARCHAR(20) DEFAULT 'PENDING',
+    triggered_order_id BIGINT,
+    trigger_time TIMESTAMP,
+    expire_time TIMESTAMP,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_user_id (user_id),
+    INDEX idx_code (code),
+    INDEX idx_status (status)
+);

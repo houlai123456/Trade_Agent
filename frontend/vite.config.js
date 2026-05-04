@@ -49,11 +49,7 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/api/rag': {
-        target: 'http://localhost:5000',
-        changeOrigin: true,
-      },
-      '/api/rag/ask/stream': {
-        target: 'http://localhost:5000',
+        target: 'http://localhost:8080',
         changeOrigin: true,
       },
       '/api': {

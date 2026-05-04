@@ -2,9 +2,9 @@
   <el-container style="height: 100vh">
     <el-header class="app-header">
       <div class="logo">
-        <span class="logo-icon">Q</span>
-        <span class="logo-text">QuantAI</span>
-        <span class="logo-sub">AI炒股助手</span>
+        <span class="logo-icon">T</span>
+        <span class="logo-text">Trade Agent</span>
+        <span class="logo-sub">A股智能交易助手</span>
       </div>
       <el-menu
         :default-active="currentRoute"
@@ -16,6 +16,7 @@
         <el-menu-item index="/ai-chat">AI对话</el-menu-item>
         <el-menu-item index="/news">新闻舆情</el-menu-item>
         <el-menu-item index="/alerts">异动预警</el-menu-item>
+        <el-menu-item index="/watch">盯盘设置</el-menu-item>
       </el-menu>
       <div class="header-right">
         <el-autocomplete
@@ -100,6 +101,13 @@ function handleWsMessage(data) {
       title: '异动预警',
       message: data.data.description || `${data.data.name} (${data.data.code}) 出现异动`,
       type: 'warning',
+      duration: 5000,
+    })
+  } else if (data.type === 'WATCH_ALERT') {
+    ElNotification({
+      title: '盯盘提醒',
+      message: data.message || `${data.name} (${data.code}) 触发盯盘条件`,
+      type: 'info',
       duration: 5000,
     })
   }

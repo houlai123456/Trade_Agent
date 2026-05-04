@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.impl.LaissezFaireSubTypeValidator;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -20,13 +21,10 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
 public class RedisConfig {
 
     @Bean
-    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory factory) {
-        try {
-            // 快速验证连接是否可用
-            factory.getConnection().ping();
-        } catch (Exception e) {
-            log.warn("Redis 连接失败，缓存功能降级: {}", e.getMessage());
-            // 返回一个空的 RedisTemplate，使用时内部 try-catch 避免崩溃
+    public RedisTemplate<String, Object> redisTemplate(ObjectProvider<RedisConnectionFactory> factoryProvider) {
+        RedisConnectionFactory factory = factoryProvider.getIfAvailable();
+        if (factory == null) {
+            log.warn("RedisConnectionFactory 不可用（Redis未启动），缓存功能降级");
             RedisTemplate<String, Object> fallback = new RedisTemplate<>();
             fallback.setKeySerializer(new StringRedisSerializer());
             fallback.setValueSerializer(new StringRedisSerializer());

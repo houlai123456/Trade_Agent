@@ -1,6 +1,6 @@
-# QuantAI — 多Agent A股投研助手
+# Trade Agent — A股智能交易助手
 
-基于 **Spring Boot + DeepSeek + Vue 3** 的个人投研辅助系统，通过多Agent协作分析 + 实时数据 + 自然语言交互，辅助股票投研决策。
+基于 **Spring Boot + DeepSeek + Vue 3 + Python** 的多Agent A股智能交易辅助系统，通过多Agent协同分析 + 实时行情 + 自然语言交互，为用户提供舆情分析、技术诊断、交易建议的全链路服务，并支持自定义盯盘规则与条件单自动交易。
 
 ## 架构
 
@@ -9,9 +9,10 @@
 │ 前端     │   │ 后端          │   │ Python 数据层        │
 │ Vue 3    │   │ Spring Boot   │   │ Flask + AKShare     │
 │ Element+ │←─→│ WebSocket    │←─→│ 行情 / K线 / 资金流向│
-│ ECharts  │   │ 多Agent编排   │   │ 新闻爬虫            │
-│          │   │ RAG 知识问答  │   └─────────────────────┘
-└──────────┘   │ 交易校验       │
+│ ECharts  │   │ 多Agent编排   │   │ 新闻爬虫 / 搜索     │
+│          │   │ ReAct Agent   │   └─────────────────────┘
+└──────────┘   │ RAG 知识库    │
+               │ 盯盘/条件单   │
                └───────┬───────┘
                        │
                ┌───────▼───────┐
@@ -22,10 +23,10 @@
                └───────────────┘
 ```
 
-## Agent 系统
+## 功能模块
 
-### 1. 多Agent协作流水线
-三步分析流程：**舆情分析 → 技术分析 → 综合建议**，前两步**并行执行**。
+### 1. 多Agent协作分析
+三步分析流水线：**舆情分析 → 技术分析 → 综合建议**，前两步并行执行，降低端到端延迟。
 
 | Agent | 功能 | 数据源 |
 |-------|------|--------|
@@ -33,13 +34,30 @@
 | 市场分析Agent | K线趋势、均线、量能分析 | AKShare 实时数据 |
 | 交易建议Agent | 综合生成买卖建议 + 风险提示 | 前两个Agent输出 |
 
-### 2. ReAct Agent
-自由对话式分析，DeepSeek 自主决定调什么工具、何时回答。
+内置校验机制：Agent输出异常时自动降级为规则兜底方案。
 
-内置工具：`getQuote` / `getKline` / `getFundFlow` / `getNewsSentiment`
+### 2. ReAct 自主推理
+基于 DeepSeek 实现 Thought→Action→Observation 循环，Agent 根据用户提问自动决策调用哪些工具，无需预设分析路径。
 
-### 3. RAG 知识问答
-新闻向量化存储（Qdrant + 阿里云 Embedding），支持基于实时新闻的语义检索问答。
+内置工具：`getQuote` / `getKline` / `getFundFlow` / `getNewsSentiment` / `searchRag`
+
+### 3. RAG 知识库
+支持上传 PDF/TXT 文档，通过 Qdrant 向量库 + 阿里云 Embedding 构建私有知识索引，并封装为 ReAct Agent 的可调用工具，使分析结论可引用内部非公开资料。
+
+### 4. 实时行情看板
+- 自选股实时行情（WebSocket 推送，1秒刷新）
+- 主要指数（上证、深证、创业板、科创50）
+- 市场概况（涨跌家数、涨跌停、成交额）
+- A股板块行情（主板/创业板/科创板/北交所）
+- 个股K线（日/周/月 + MA均线 + 量能）
+- 资金流向、北向资金、五日分时图
+- 热点板块排名、概念板块
+- 异动预警推送
+
+### 5. 盯盘与条件单
+- 自定义价格预警规则（高于/低于指定价），触发时实时推送通知
+- 条件单支持涨破/跌破自动触发限价挂单，打通监控到交易执行闭环
+- 交易时段每10秒自动扫描，无需人工值守
 
 ## 快速启动
 
@@ -73,7 +91,7 @@ mvn spring-boot:run
 ```bash
 cd backend
 pip install -r requirements.txt
-python app.py
+python data_service.py
 ```
 
 **前端：**
@@ -91,7 +109,7 @@ npm run dev
 |----|------|
 | 前端 | Vue 3, Vite 5, Element Plus, ECharts, Pinia |
 | 后端 | Spring Boot 3.2, MyBatis-Plus, Redis, WebSocket |
-| AI | DeepSeek V4 (ReAct), Spring AI, Qdrant |
+| AI | DeepSeek (ReAct), Spring AI, Qdrant |
 | 数据 | Python Flask, AKShare, H2/MySQL |
 
 ## License
