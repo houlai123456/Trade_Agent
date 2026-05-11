@@ -37,7 +37,7 @@
 内置校验机制：Agent输出异常时自动降级为规则兜底方案。
 
 ### 2. ReAct 自主推理
-基于 DeepSeek 实现 Thought→Action→Observation 循环，Agent 根据用户提问自动决策调用哪些工具，无需预设分析路径。
+采用状态机模式驱动Thought→Action→Observation推理循环，Agent 根据用户提问自动决策调用哪些工具，无需预设分析路径。
 
 内置工具：`getQuote` / `getKline` / `getFundFlow` / `getNewsSentiment` / `searchRag`
 
