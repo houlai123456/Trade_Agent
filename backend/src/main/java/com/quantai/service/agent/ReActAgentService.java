@@ -21,7 +21,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * ReAct Agent — 自主推理+行动循环
+ * ReAct Agent — 状态机模式实现
  * LLM自主决定调什么工具、什么时候给最终答案
  */
 @Slf4j
@@ -34,6 +34,17 @@ public class ReActAgentService {
     private final List<Tool> tools;
 
     private static final int MAX_ITERATIONS = 10;
+
+    /* ========== 状态机定义 ========== */
+    enum AgentState {
+        INIT,           // 初始状态
+        THINKING,       // 调用LLM获取思考
+        DECIDING,       // 判断LLM输出是Action还是Final
+        EXECUTING,      // 执行工具调用
+        OBSERVING,      // 记录工具返回并判断是否继续
+        TIMEOUT,        // 超时终止
+        FINISHED        // 终态
+    }
 
     /** 构建工具描述（给LLM的System Prompt） */
     private String buildToolDescriptions() {
@@ -70,7 +81,7 @@ public class ReActAgentService {
     }
 
     /**
-     * 运行 ReAct 循环
+     * 运行 ReAct 状态机
      * @param userMessage 用户输入，如"分析一下贵州茅台"
      * @return 完整的思考轨迹 + 最终答案
      */
@@ -82,83 +93,111 @@ public class ReActAgentService {
         messages.add(Map.of("role", "system", "content", buildToolDescriptions()));
         messages.add(Map.of("role", "user", "content", userMessage));
 
-        String finalAnswer = null;
+        // 状态机上下文
+        AgentState state = AgentState.INIT;
         int iteration = 0;
+        String llmResponse = null;
+        String thought = null;
+        String actionJson = null;
+        String finalAnswer = null;
 
-        while (iteration < MAX_ITERATIONS) {
-            iteration++;
-            log.info("ReAct 第{}轮", iteration);
+        while (state != AgentState.FINISHED) {
+            switch (state) {
 
-            // 1. 调用LLM
-            String response = callLlm(messages);
+                case INIT:
+                    state = AgentState.THINKING;
+                    break;
 
-            // 2. 检查是否有Final
-            String finalResult = extractFinal(response);
-            if (finalResult != null) {
-                finalAnswer = finalResult;
-                trace.add(ReActStep.builder()
-                        .thought("得出最终结论")
-                        .action("Final")
-                        .observation(finalResult)
-                        .build());
-                break;
-            }
+                case THINKING:
+                    iteration++;
+                    log.info("ReAct 第{}轮", iteration);
+                    llmResponse = callLlm(messages);
+                    state = AgentState.DECIDING;
+                    break;
 
-            // 3. 解析Thought + Action
-            String thought = extractThought(response);
-            String actionJson = extractAction(response);
+                case DECIDING: {
+                    thought = extractThought(llmResponse);
+                    actionJson = extractAction(llmResponse);
+                    String finalResult = extractFinal(llmResponse);
 
-            if (actionJson == null) {
-                // LLM没返回Action格式，可能是直接回答了
-                finalAnswer = response;
-                trace.add(ReActStep.builder()
-                        .thought(thought != null ? thought : "直接回答")
-                        .action("Final")
-                        .observation(response)
-                        .build());
-                break;
-            }
-
-            // 4. 执行工具
-            String observation;
-            try {
-                Map<String, Object> action = objectMapper.readValue(actionJson, new TypeReference<Map<String, Object>>() {});
-                String toolName = (String) action.get("name");
-
-                @SuppressWarnings("unchecked")
-                Map<String, Object> args = action.get("args") instanceof Map
-                        ? (Map<String, Object>) action.get("args")
-                        : new LinkedHashMap<>();
-
-                Tool tool = findTool(toolName);
-                if (tool == null) {
-                    observation = "错误：找不到工具【" + toolName + "】，可用工具：" + tools.stream().map(Tool::getName).toList();
-                } else {
-                    log.info("调用工具: {}({})", toolName, args);
-                    observation = tool.execute(args);
-                    log.info("工具返回: {}...", observation.length() > 100 ? observation.substring(0, 100) : observation);
+                    if (finalResult != null) {
+                        // LLM主动给出最终结论
+                        finalAnswer = finalResult;
+                        trace.add(ReActStep.builder()
+                                .thought("得出最终结论")
+                                .action("Final")
+                                .observation(finalResult)
+                                .build());
+                        state = AgentState.FINISHED;
+                    } else if (actionJson == null) {
+                        // LLM没返回Action格式，直接当作回答
+                        finalAnswer = llmResponse;
+                        trace.add(ReActStep.builder()
+                                .thought(thought != null ? thought : "直接回答")
+                                .action("Final")
+                                .observation(llmResponse)
+                                .build());
+                        state = AgentState.FINISHED;
+                    } else {
+                        state = AgentState.EXECUTING;
+                    }
+                    break;
                 }
-            } catch (Exception e) {
-                observation = "执行错误：" + e.getMessage();
-                log.warn("工具执行失败", e);
+
+                case EXECUTING: {
+                    String observation;
+                    try {
+                        Map<String, Object> action = objectMapper.readValue(actionJson,
+                                new TypeReference<Map<String, Object>>() {});
+                        String toolName = (String) action.get("name");
+
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> args = action.get("args") instanceof Map
+                                ? (Map<String, Object>) action.get("args")
+                                : new LinkedHashMap<>();
+
+                        Tool tool = findTool(toolName);
+                        if (tool == null) {
+                            observation = "错误：找不到工具【" + toolName + "】，可用工具：" + tools.stream().map(Tool::getName).toList();
+                        } else {
+                            log.info("调用工具: {}({})", toolName, args);
+                            observation = tool.execute(args);
+                            log.info("工具返回: {}...", observation.length() > 100 ? observation.substring(0, 100) : observation);
+                        }
+                    } catch (Exception e) {
+                        observation = "执行错误：" + e.getMessage();
+                        log.warn("工具执行失败", e);
+                    }
+
+                    trace.add(ReActStep.builder()
+                            .thought(thought != null ? thought : "")
+                            .action(actionJson)
+                            .observation(observation)
+                            .build());
+
+                    messages.add(Map.of("role", "assistant", "content", llmResponse));
+                    messages.add(Map.of("role", "system", "content", "Observation: " + observation));
+
+                    state = AgentState.OBSERVING;
+                    break;
+                }
+
+                case OBSERVING:
+                    if (iteration >= MAX_ITERATIONS) {
+                        state = AgentState.TIMEOUT;
+                    } else {
+                        state = AgentState.THINKING;
+                    }
+                    break;
+
+                case TIMEOUT:
+                    finalAnswer = "{\"analysis\":\"分析超时，未能完成完整的分析流程。请尝试更具体的提问。\",\"suggestion\":\"HOLD\",\"confidence\":\"LOW\",\"reason\":\"分析轮数超限\"}";
+                    state = AgentState.FINISHED;
+                    break;
             }
-
-            trace.add(ReActStep.builder()
-                    .thought(thought != null ? thought : "")
-                    .action(actionJson)
-                    .observation(observation)
-                    .build());
-
-            // 5. 把结果喂回给LLM
-            messages.add(Map.of("role", "assistant", "content", response));
-            messages.add(Map.of("role", "system", "content", "Observation: " + observation));
         }
 
-        if (finalAnswer == null) {
-            finalAnswer = "{\"analysis\":\"分析超时，未能完成完整的分析流程。请尝试更具体的提问。\",\"suggestion\":\"HOLD\",\"confidence\":\"LOW\",\"reason\":\"分析轮数超限\"}";
-        }
-
-        // 如果finalAnswer是JSON格式，提取analysis字段作为纯文本返回（前端不再需要解析JSON）
+        // 如果finalAnswer是JSON格式，提取analysis字段作为纯文本返回
         finalAnswer = extractPlainText(finalAnswer);
 
         long duration = System.currentTimeMillis() - start;
