@@ -8,6 +8,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
 
 @Configuration
 public class MyBatisPlusConfig {
@@ -15,8 +17,16 @@ public class MyBatisPlusConfig {
     @Bean
     public MybatisPlusInterceptor mybatisPlusInterceptor(DataSource dataSource) {
         MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
-        DbType dbType = JdbcUtils.getDbType(dataSource);
+        DbType dbType = getDbType(dataSource);
         interceptor.addInnerInterceptor(new PaginationInnerInterceptor(dbType));
         return interceptor;
+    }
+
+    private DbType getDbType(DataSource dataSource) {
+        try (Connection conn = dataSource.getConnection()) {
+            return JdbcUtils.getDbType(conn.getMetaData().getURL());
+        } catch (SQLException e) {
+            return DbType.MYSQL;
+        }
     }
 }

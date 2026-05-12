@@ -43,7 +43,7 @@ spring:
   ai:
     openai:
       base-url: https://api.deepseek.com
-      api-key: ${DEEPSEEK_API_KEY:}
+      api-key: ${DEEPSEEK_API_KEY:sk-placeholder}
       chat:
         options:
           model: deepseek-chat
@@ -86,7 +86,7 @@ spring:
     url: jdbc:mysql://localhost:3306/trading_helper?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&createDatabaseIfNotExist=true
     driver-class-name: com.mysql.cj.jdbc.Driver
     username: root
-    password: root
+    password: 123456789zjw
   h2:
     console:
       enabled: false

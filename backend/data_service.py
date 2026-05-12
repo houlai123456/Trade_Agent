@@ -6,6 +6,7 @@ AKShare 数据服务
 """
 import logging
 import threading
+import time
 import concurrent.futures
 from datetime import datetime
 from functools import wraps

@@ -1,6 +1,6 @@
 -- 初始化常用A股参考数据（仅用于开发和测试）
 -- 正式使用时会通过新浪API获取实时数据
-MERGE INTO stock_info (code, name, industry, exchange) KEY(code) VALUES
+INSERT IGNORE INTO stock_info (code, name, industry, exchange) VALUES
 ('sh600519', '贵州茅台', '白酒', 'SH'),
 ('sh600036', '招商银行', '银行', 'SH'),
 ('sh601318', '中国平安', '保险', 'SH'),
@@ -23,5 +23,5 @@ MERGE INTO stock_info (code, name, industry, exchange) KEY(code) VALUES
 ('sz000725', '京东方A', '电子', 'SZ');
 
 -- 初始化虚拟账户（单用户模式，初始资金100万）
-MERGE INTO trade_account (user_id, total_assets, available_balance, frozen_balance, market_value) KEY(user_id) VALUES
+INSERT IGNORE INTO trade_account (user_id, total_assets, available_balance, frozen_balance, market_value) VALUES
 (1, 1000000.00, 1000000.00, 0.00, 0.00);

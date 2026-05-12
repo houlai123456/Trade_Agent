@@ -81,8 +81,8 @@ public class TradeServiceImpl implements TradeService {
                     "status VARCHAR(10) DEFAULT 'DONE'," +
                     "trade_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
                     "create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
-            jdbcTemplate.execute("MERGE INTO trade_account (user_id,total_assets,available_balance,frozen_balance,market_value) " +
-                    "KEY(user_id) VALUES (1,1000000.00,1000000.00,0.00,0.00)");
+            jdbcTemplate.execute("INSERT IGNORE INTO trade_account (user_id,total_assets,available_balance,frozen_balance,market_value) " +
+                    "VALUES (1,1000000.00,1000000.00,0.00,0.00)");
             // 兼容升级：给 trade_order 添加 order_type 列
             try {
                 jdbcTemplate.execute("ALTER TABLE trade_order ADD COLUMN order_type VARCHAR(10) DEFAULT 'MARKET'");
