@@ -82,6 +82,26 @@ public class StockWebSocketHandler extends TextWebSocketHandler {
         broadcast(new WebSocketMessage("ALERT", alertData));
     }
 
+    public void pushIndexUpdate(Object data) {
+        broadcast(new WebSocketMessage("INDEX_UPDATE", data));
+    }
+
+    public void pushBoardUpdate(Object data) {
+        broadcast(new WebSocketMessage("BOARD_UPDATE", data));
+    }
+
+    public void pushHotBoardUpdate(Object data) {
+        broadcast(new WebSocketMessage("HOT_BOARD_UPDATE", data));
+    }
+
+    public void pushHotConceptUpdate(Object data) {
+        broadcast(new WebSocketMessage("HOT_CONCEPT_UPDATE", data));
+    }
+
+    public void pushMarketUpdate(Object data) {
+        broadcast(new WebSocketMessage("MARKET_UPDATE", data));
+    }
+
     /**
      * WebSocket消息封装
      */

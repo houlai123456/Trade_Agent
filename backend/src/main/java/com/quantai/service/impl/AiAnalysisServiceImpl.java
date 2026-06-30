@@ -2,6 +2,7 @@ package com.quantai.service.impl;
 
 import com.quantai.model.entity.StockQuote;
 import com.quantai.service.AiAnalysisService;
+import com.quantai.service.DataServiceClient;
 import com.quantai.service.StockService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -11,13 +12,17 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -26,6 +31,31 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
 
     private final OpenAiChatModel chatModel;
     private final StockService stockService;
+    private final DataServiceClient dataServiceClient;
+    private final RedisTemplate<String, Object> redisTemplate;
+
+    // ========== Redis 缓存 Key 前缀 & TTL ==========
+    private static final String CACHE_PREFIX = "ai:";
+    private static final long TTL_STOCK = 300;        // 行情分析 5分钟
+    private static final long TTL_FINANCE = 3600;     // 财报解读 1小时
+    private static final long TTL_SENTIMENT = 3600;   // 情感分析 1小时
+
+    private String cacheGet(String key) {
+        try {
+            return (String) redisTemplate.opsForValue().get(CACHE_PREFIX + key);
+        } catch (Exception e) {
+            log.warn("Redis读取失败 key={}: {}", key, e.getMessage());
+            return null;
+        }
+    }
+
+    private void cachePut(String key, String value, long ttlSec) {
+        try {
+            redisTemplate.opsForValue().set(CACHE_PREFIX + key, value, ttlSec, TimeUnit.SECONDS);
+        } catch (Exception ignored) {
+            // Redis不可用时静默降级
+        }
+    }
 
     @Override
     public Flux<ChatResponse> chatStream(String message, String stockCode) {
@@ -44,6 +74,13 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
 
     @Override
     public String analyzeStock(String code) {
+        String cacheKey = "stock:" + code;
+        String cached = cacheGet(cacheKey);
+        if (cached != null) {
+            log.debug("Redis命中缓存 analyzeStock({})", code);
+            return cached;
+        }
+
         StockQuote quote = stockService.getQuote(code);
         if (quote == null || quote.getCurrentPrice() == null) {
             return "未能获取到股票【" + code + "】的实时行情数据。\n" +
@@ -69,11 +106,184 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
                 quote.getName(), quote.getCode()
         );
 
-        return chat(prompt, code);
+        String result = chat(prompt, code);
+        cachePut(cacheKey, result, TTL_STOCK);
+        return result;
+    }
+
+    @Override
+    public String analyzeFinance(String code) {
+        String cacheKey = "finance:" + code;
+        String cached = cacheGet(cacheKey);
+        if (cached != null) {
+            log.debug("Redis命中缓存 analyzeFinance({})", code);
+            return cached;
+        }
+
+        StockQuote quote = stockService.getQuote(code);
+        String stockName = quote != null && quote.getName() != null ? quote.getName() : code;
+
+        java.util.List<java.util.Map<String, Object>> financeList = dataServiceClient.fetchFinance(code);
+        if (financeList == null || financeList.isEmpty()) {
+            return "未能获取到股票【" + stockName + "(" + code + ")】的财务数据，请稍后重试。";
+        }
+
+        int endIdx = Math.min(financeList.size(), 20);
+        int startIdx = Math.max(0, endIdx - 4);
+        java.util.List<java.util.Map<String, Object>> recentData = financeList.subList(startIdx, endIdx);
+
+        StringBuilder financeText = new StringBuilder();
+        for (java.util.Map<String, Object> row : recentData) {
+            financeText.append("报告期：").append(row.getOrDefault("报告期", "")).append("\n");
+            String[] keys = {
+                "营业总收入", "营业总收入同比增长", "净利润", "净利润同比增长",
+                "基本每股收益", "每股净资产", "净资产收益率",
+                "资产负债率", "流动比率", "速动比率",
+                "毛利率", "净利率",
+                "经营活动现金流量净额", "投资活动现金流量净额", "筹资活动现金流量净额",
+                "研发费用", "研发费用占营业总收入比例",
+                "存货周转率", "应收账款周转率", "总资产周转率",
+                "营业总收入环比增长率", "净利润环比增长率"
+            };
+            for (String key : keys) {
+                Object val = row.get(key);
+                if (val != null && !val.toString().isEmpty()) {
+                    financeText.append("  ").append(key).append("：").append(val).append("\n");
+                }
+            }
+            financeText.append("\n");
+        }
+
+        if (financeText.length() == 0) {
+            return "股票【" + stockName + "(" + code + ")】的财务数据为空。";
+        }
+
+        String prompt = String.format("""
+                你是一位资深的A股财务分析师。以下是股票【%s(%s)】最近几个报告期的财务指标数据：
+
+                %s
+
+                请从以下维度进行专业解读（用Markdown格式输出，控制在800字以内）：
+
+                ### 一、营收与利润趋势
+                分析营业总收入和净利润的变化趋势，同比增长情况，环比变化
+
+                ### 二、盈利能力
+                分析毛利率、净利率、净资产收益率(ROE)的水平与变化
+
+                ### 三、财务健康度
+                分析资产负债率、流动比率、速动比率，判断偿债能力和财务风险
+
+                ### 四、现金流状况
+                分析经营/投资/筹资三大现金流情况，判断现金流健康度
+
+                ### 五、运营效率
+                分析存货周转、应收账款周转、总资产周转等指标
+
+                ### 六、综合评价
+                给出整体评价和需要关注的风险点
+
+                注意：
+                - 使用具体数据说话，不要泛泛而谈
+                - 趋势对比要指明变动方向和幅度
+                - 风险提示要具体明确
+                - 不推荐买卖，仅做基本面分析
+                """,
+                stockName, code, financeText.toString());
+
+        String result = chat(prompt, code);
+        cachePut(cacheKey, result, TTL_FINANCE);
+        return result;
+    }
+
+    @Override
+    public String analyzeFinanceCompare(String code1, String code2) {
+        String cacheKey = "compare:" + code1 + ":" + code2;
+        String cached = cacheGet(cacheKey);
+        if (cached != null) {
+            log.debug("Redis命中缓存 analyzeFinanceCompare({}, {})", code1, code2);
+            return cached;
+        }
+
+        StockQuote q1 = stockService.getQuote(code1);
+        StockQuote q2 = stockService.getQuote(code2);
+        String n1 = q1 != null && q1.getName() != null ? q1.getName() : code1;
+        String n2 = q2 != null && q2.getName() != null ? q2.getName() : code2;
+
+        String f1 = buildFinanceSummary(code1, n1);
+        String f2 = buildFinanceSummary(code2, n2);
+        if (f1 == null || f2 == null) {
+            return "未能获取财务数据，请检查股票代码。";
+        }
+
+        String prompt = String.format("""
+                你是一位资深的A股财务分析师。请对比分析以下两只股票的财务数据。
+
+                【%s(%s)】
+                %s
+
+                【%s(%s)】
+                %s
+
+                请从以下维度进行对比分析（Markdown格式，控制在600字以内）：
+
+                ### 一、营收规模对比
+                比较两家公司的营业总收入和体量差异
+
+                ### 二、盈利能力对比
+                比较毛利率、净利率、ROE
+
+                ### 三、增长对比
+                比较营收和净利润的同比增长
+
+                ### 四、财务健康度对比
+                比较资产负债率、现金流状况
+
+                ### 五、综合评价
+                给出对比结论和各自的优势/风险点
+
+                注意：使用具体数据，客观对比，不推荐买卖。
+                """,
+                n1, code1, f1, n2, code2, f2);
+
+        String result = chat(prompt, code1);
+        cachePut(cacheKey, result, TTL_FINANCE);
+        return result;
+    }
+
+    /** 提取财报关键数据摘要，供对比使用 */
+    private String buildFinanceSummary(String code, String name) {
+        java.util.List<java.util.Map<String, Object>> list = dataServiceClient.fetchFinance(code);
+        if (list == null || list.isEmpty()) return null;
+
+        int idx = Math.min(list.size() - 1, 3);
+        StringBuilder sb = new StringBuilder();
+        java.util.Map<String, Object> latest = list.get(idx);
+        sb.append("报告期：").append(latest.getOrDefault("报告期", "")).append("\n");
+        String[] keys = {
+            "营业总收入", "营业总收入同比增长", "净利润", "净利润同比增长",
+            "基本每股收益", "每股净资产", "净资产收益率",
+            "资产负债率", "毛利率", "净利率",
+            "经营活动现金流量净额", "研发费用"
+        };
+        for (String k : keys) {
+            Object v = latest.get(k);
+            if (v != null && !v.toString().isEmpty()) {
+                sb.append(k).append("：").append(v).append("\n");
+            }
+        }
+        return sb.toString();
     }
 
     @Override
     public String analyzeSentiment(String title, String content) {
+        String cacheKey = "sentiment:" + md5((title != null ? title : "") + (content != null ? content : ""));
+        String cached = cacheGet(cacheKey);
+        if (cached != null) {
+            log.debug("Redis命中缓存 analyzeSentiment");
+            return cached;
+        }
+
         String prompt = String.format(
                 "你是一位金融舆情分析师。请分析以下财经新闻的情绪倾向，以及它影响哪些股票或板块。\n" +
                         "标题：%s\n内容：%s\n\n" +
@@ -85,7 +295,21 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
                         "注意：请严格区分有利好和中性。常规财报发布、例行公告、指数常规涨跌、行业常规数据披露等无明显利好信号的新闻，应判为NEUTRAL，不要因为公司业绩增长就自动判为POSITIVE，只有明确超出预期或包含正面引导的才判为POSITIVE。同理，只有明确提及重大利空（亏损、罚款、诉讼、监管处罚等）才判为NEGATIVE。",
                 title, content
         );
-        return chat(prompt, null);
+        String result = chat(prompt, null);
+        cachePut(cacheKey, result, TTL_SENTIMENT);
+        return result;
+    }
+
+    private static String md5(String text) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(text.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return Integer.toHexString(text.hashCode());
+        }
     }
 
     private List<Message> buildMessages(String message, String stockCode) {
@@ -109,7 +333,7 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
                 """;
         messages.add(new SystemMessage(systemPrompt));
 
-        if (stockCode != null && !stockCode.isBlank()) {
+        if (stockCode != null && !stockCode.trim().isEmpty()) {
             StockQuote quote = stockService.getQuote(stockCode);
             if (quote != null && quote.getCurrentPrice() != null) {
                 String context = buildMarketContext(quote);

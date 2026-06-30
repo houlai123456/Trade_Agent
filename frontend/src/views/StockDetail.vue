@@ -99,7 +99,7 @@
       <el-form :model="tradeForm" label-width="80px" size="default" inline>
         <el-form-item label="交易数量">
           <el-input-number v-model="tradeForm.quantity" :min="100" :step="100" :max="99999900" />
-          <span style="margin-left: 8px; color: #909399; font-size: 13px">股（1手=100股）</span>
+          <span class="text-secondary" style="margin-left: 8px; font-size: 13px">股（1手=100股）</span>
         </el-form-item>
         <el-form-item label="限价">
           <el-input-number v-model="tradeForm.price" :precision="2" :step="0.01" :min="0.01" :max="99999" style="width: 160px" />
@@ -161,6 +161,60 @@
       </el-table>
     </el-card>
 
+    <!-- ===== AI财报解读 ===== -->
+    <el-card class="card" style="margin-top: 16px" v-if="!isIndex">
+      <template #header>
+        <div class="agent-header">
+          <span>AI 财报解读</span>
+          <div class="finance-header-btns">
+            <el-button type="primary" size="small" @click="runFinanceAnalysis" :loading="financeLoading" :disabled="financeLoading">
+              {{ financeReport ? '重新解读' : '开始分析' }}
+            </el-button>
+            <el-popover placement="bottom" :width="360" trigger="click" @show="compareReport = ''">
+              <template #reference>
+                <el-button size="small" :disabled="!financeReport">对比分析</el-button>
+              </template>
+              <div style="margin-bottom: 12px; font-size: 13px; color: #606266">
+                选择对标股票，AI 将从营收、利润、ROE、负债率等维度进行对比
+              </div>
+              <el-autocomplete
+                v-model="compareCode"
+                :fetch-suggestions="searchStockCompare"
+                :trigger-on-focus="false"
+                placeholder="输入股票代码或名称"
+                style="width: 100%; margin-bottom: 10px"
+                clearable
+                @select="(item) => compareCode = item.code"
+              >
+                <template #default="{ item }">
+                  <span style="font-weight:600;font-family:monospace">{{ item.code }}</span>
+                  <span style="margin-left:8px;color:#606266">{{ item.name }}</span>
+                </template>
+              </el-autocomplete>
+              <el-button type="primary" size="small" @click="runCompare" :loading="compareLoading" :disabled="!compareCode" style="width: 100%">
+                {{ compareReport ? '重新对比' : '开始对比' }}
+              </el-button>
+              <div v-if="compareReport" class="compare-result" style="margin-top:12px;max-height:400px;overflow-y:auto">
+                <div v-html="renderMarkdown(compareReport)" style="font-size:13px;line-height:1.7"></div>
+              </div>
+            </el-popover>
+          </div>
+        </div>
+      </template>
+
+      <div v-if="!financeReport && !financeLoading" class="agent-placeholder">
+        <span>基于最近几个报告期的财务数据，AI 将从营收利润、盈利能力、财务健康度、现金流、运营效率等维度进行基本面解读</span>
+      </div>
+
+      <div v-if="financeLoading" class="finance-loading" v-loading="true" element-loading-text="AI正在解读财报数据，请耐心等待...">
+        <div style="height: 80px"></div>
+      </div>
+
+      <div v-if="financeReport && !financeLoading" class="finance-report">
+        <div class="report-content" v-html="renderMarkdown(financeReport)"></div>
+      </div>
+    </el-card>
+
     <!-- ===== 多Agent一键分析 ===== -->
     <AICollaboration :stock-code="code" />
 
@@ -170,12 +224,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Star, StarFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { getQuote, getKline, getWatchlist, addWatchlist, removeWatchlist, getIndexQuote, getIndexKline, getIntraday, getIndexIntraday, getFundFlow, getBidAsk } from '../api/stock'
+import { getQuote, getKline, getWatchlist, addWatchlist, removeWatchlist, getIndexQuote, getIndexKline, getIntraday, getIndexIntraday, getFundFlow, getBidAsk, getFinanceAnalysis, getFinanceCompare, searchStock } from '../api/stock'
+import { useStockStore } from '../stores/stock'
 import { placeOrder } from '../api/trade'
 import { createWebSocket } from '../utils/websocket'
 import KLineChart from '../components/KLineChart.vue'
@@ -203,6 +258,11 @@ const isWatchlisted = ref(false)
 const tradeForm = ref({ quantity: 100, price: null })
 const buying = ref(false)
 const selling = ref(false)
+const financeReport = ref('')
+const financeLoading = ref(false)
+const compareCode = ref('')
+const compareReport = ref('')
+const compareLoading = ref(false)
 
 const fundRows = [
   { type: '主力', key: '主力' },
@@ -213,6 +273,7 @@ const fundRows = [
 ]
 
 let wsClient = null
+const stockStore = useStockStore()
 
 onMounted(() => {
   loadQuote()
@@ -221,6 +282,28 @@ onMounted(() => {
   if (!isIndex.value) { checkWatchlist(); loadFundFlow(); loadBidAsk() }
   connectWebSocket()
 })
+
+// WebSocket 实时行情 — 行情+K线联动
+watch(() => stockStore.quotes[code.value], (newQuote) => {
+  if (!newQuote || newQuote.currentPrice == null) return
+  quote.value = { ...quote.value, ...newQuote }
+  // 日K模式下实时更新最后一根蜡烛
+  if (period.value === 'DAY' && klineData.value.length > 0) {
+    const last = klineData.value[klineData.value.length - 1]
+    if (last) {
+      last.close = newQuote.currentPrice
+      if (newQuote.highPrice != null && newQuote.highPrice > (last.high || 0)) last.high = newQuote.highPrice
+      if (newQuote.lowPrice != null && (last.low == null || newQuote.lowPrice < last.low)) last.low = newQuote.lowPrice
+      if (newQuote.volume != null) last.volume = newQuote.volume
+    }
+  }
+  // 分时模式下追加数据点
+  if (period.value === 'INTRADAY' && intradayData.value.length > 0) {
+    const now = new Date()
+    const time = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0') + ':' + now.getSeconds().toString().padStart(2,'0')
+    intradayData.value.push({ time, price: newQuote.currentPrice, volume: newQuote.volume || 0 })
+  }
+}, { deep: false })
 
 onBeforeUnmount(() => {
   if (wsClient) wsClient.disconnect()
@@ -402,6 +485,55 @@ async function handleSell() {
   }
 }
 
+async function runFinanceAnalysis() {
+  financeLoading.value = true
+  financeReport.value = ''
+  try {
+    const res = await getFinanceAnalysis(code.value)
+    financeReport.value = res.report || 'AI 未能生成解读报告，请稍后重试。'
+  } catch (e) {
+    console.error('财报解读失败', e)
+    financeReport.value = '解读失败：' + (e.message || '网络错误，请稍后重试。')
+  } finally {
+    financeLoading.value = false
+  }
+}
+
+async function searchStockCompare(query, cb) {
+  if (!query.trim()) { cb([]); return }
+  try {
+    const data = await searchStock(query)
+    const list = Array.isArray(data) ? data : (data.data || [])
+    cb(list.map(r => ({ ...r, value: `${r.code} ${r.name}` })))
+  } catch (e) { cb([]) }
+}
+
+async function runCompare() {
+  if (!compareCode.value.trim()) return
+  compareLoading.value = true
+  compareReport.value = ''
+  try {
+    const res = await getFinanceCompare(code.value, compareCode.value.trim())
+    compareReport.value = res.report || '对比分析生成失败，请稍后重试。'
+  } catch (e) {
+    compareReport.value = '对比失败：' + (e.message || '网络错误。')
+  } finally {
+    compareLoading.value = false
+  }
+}
+
+function renderMarkdown(text) {
+  if (!text) return ''
+  let escaped = text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return escaped
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>')
+}
+
 function fmtMoney(v) {
   if (v == null) return '-'
   return '¥' + Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -502,11 +634,11 @@ function formatAmount(v) {
   display: flex;
   justify-content: space-between;
   padding: 8px 12px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 6px;
 }
 .detail-item label {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 .detail-item span {
@@ -630,6 +762,47 @@ function formatAmount(v) {
 
 .trade-card {
   margin-top: 16px;
+}
+
+.finance-loading {
+  padding: 16px 0;
+}
+
+.finance-report {
+  padding: 8px 0;
+}
+
+.report-content {
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--el-text-color-primary);
+}
+
+.report-content :deep(h1) {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 16px 0 8px;
+  color: var(--el-text-color-primary);
+}
+
+.report-content :deep(h2) {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 14px 0 6px;
+  color: var(--el-text-color-primary);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--el-border-color-light);
+}
+
+.report-content :deep(h3) {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 10px 0 4px;
+  color: var(--el-text-color-regular);
+}
+
+.report-content :deep(strong) {
+  color: var(--el-text-color-primary);
 }
 
 </style>

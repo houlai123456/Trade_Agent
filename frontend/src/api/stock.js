@@ -1,11 +1,8 @@
-import request from './request'
+import request, { track } from './request'
 import axios from 'axios'
 
-// 搜索股票（用独立实例，超时30秒以应对首次缓存预热）
-const searchRequest = axios.create({
-  baseURL: '/api',
-  timeout: 30000,
-})
+const searchRequest = axios.create({ baseURL: '/api', timeout: 30000 })
+track(searchRequest)
 searchRequest.interceptors.response.use(
   (response) => response.data,
   (error) => {
@@ -55,10 +52,8 @@ export function getIndexQuotes() {
 }
 
 // Python数据源请求（超时60秒，AKShare首次调用较慢）
-const pythonRequest = axios.create({
-  baseURL: '/api',
-  timeout: 60000,
-})
+const pythonRequest = axios.create({ baseURL: '/api', timeout: 60000 })
+track(pythonRequest)
 pythonRequest.interceptors.response.use(
   (response) => response.data,
   (error) => {
@@ -146,4 +141,22 @@ export async function getBidAsk(code) {
 export async function getNorthFlow() {
   const res = await pythonRequest.get('/stock/north-flow')
   return res.data || res
+}
+
+// AI财报解读
+export async function getFinanceAnalysis(code) {
+  const res = await request.get(`/stock/finance/analysis/${code}`, { timeout: 120000 })
+  return res
+}
+
+// AI财报对比
+export async function getFinanceCompare(code1, code2) {
+  const res = await request.get(`/stock/finance/compare/${code1}/${code2}`, { timeout: 120000 })
+  return res
+}
+
+// 板块合成K线
+export async function getBoardKline(codes, period = 'daily', limit = 120) {
+  const res = await pythonRequest.get('/stock/board/kline', { params: { codes, period, limit }, timeout: 120000 })
+  return Array.isArray(res) ? res : (res.data || [])
 }

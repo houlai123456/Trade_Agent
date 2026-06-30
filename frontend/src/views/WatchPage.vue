@@ -74,11 +74,14 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="触发条件" width="160">
+            <el-table-column label="触发条件" width="180">
               <template #default="{ row }">
-                <span v-if="row.conditionType === 'ABOVE'" style="color: #ef5350">涨破</span>
-                <span v-else style="color: #26a69a">跌破</span>
-                <span style="margin-left: 4px; font-weight: 600">{{ row.triggerPrice?.toFixed(2) }}</span>
+                <el-tag v-if="row.conditionType === 'ABOVE'" type="danger" size="small">涨破</el-tag>
+                <el-tag v-else-if="row.conditionType === 'BELOW'" type="success" size="small">跌破</el-tag>
+                <el-tag v-else-if="row.conditionType === 'GOLDEN_CROSS'" type="danger" size="small">金叉</el-tag>
+                <el-tag v-else-if="row.conditionType === 'DEATH_CROSS'" type="success" size="small">死叉</el-tag>
+                <el-tag v-else-if="row.conditionType === 'VOLUME_BREAKOUT'" type="warning" size="small">放量</el-tag>
+                <span v-if="row.triggerPrice" style="margin-left: 4px; font-weight: 600">{{ row.triggerPrice?.toFixed(2) }}</span>
               </template>
             </el-table-column>
             <el-table-column label="数量" width="80" align="right">
@@ -182,12 +185,15 @@
           </el-radio-group>
         </el-form-item>
         <el-form-item label="触发条件">
-          <el-radio-group v-model="orderForm.conditionType">
-            <el-radio value="ABOVE">涨破</el-radio>
-            <el-radio value="BELOW">跌破</el-radio>
-          </el-radio-group>
+          <el-select v-model="orderForm.conditionType" style="width: 100%">
+            <el-option label="涨破目标价" value="ABOVE" />
+            <el-option label="跌破目标价" value="BELOW" />
+            <el-option label="金叉 (MA5上穿MA10)" value="GOLDEN_CROSS" />
+            <el-option label="死叉 (MA5下穿MA10)" value="DEATH_CROSS" />
+            <el-option label="放量突破 (量>5日均量1.5倍)" value="VOLUME_BREAKOUT" />
+          </el-select>
         </el-form-item>
-        <el-form-item label="触发价格">
+        <el-form-item label="触发价格" v-if="orderForm.conditionType === 'ABOVE' || orderForm.conditionType === 'BELOW'">
           <el-input-number v-model="orderForm.triggerPrice" :precision="2" :step="0.01" :min="0.01" :max="99999" style="width: 200px" />
         </el-form-item>
         <el-form-item label="数量">
@@ -331,8 +337,13 @@ async function loadOrders() {
 }
 
 async function handleSaveOrder() {
-  if (!orderForm.value.code.trim() || !orderForm.value.triggerPrice || !orderForm.value.quantity) {
+  const needsPrice = orderForm.value.conditionType === 'ABOVE' || orderForm.value.conditionType === 'BELOW'
+  if (!orderForm.value.code.trim() || !orderForm.value.quantity) {
     ElMessage.warning('请填写完整信息')
+    return
+  }
+  if (needsPrice && !orderForm.value.triggerPrice) {
+    ElMessage.warning('请填写触发价格')
     return
   }
   if (orderForm.value.quantity % 100 !== 0) {
@@ -346,7 +357,7 @@ async function handleSaveOrder() {
       orderForm.value.name,
       orderForm.value.direction,
       orderForm.value.conditionType,
-      orderForm.value.triggerPrice,
+      orderForm.value.triggerPrice || 0,
       orderForm.value.quantity,
       orderForm.value.orderPrice || null,
     )

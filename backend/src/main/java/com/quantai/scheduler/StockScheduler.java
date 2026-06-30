@@ -1,6 +1,7 @@
 package com.quantai.scheduler;
 
 import com.quantai.model.entity.StockQuote;
+import com.quantai.feishu.FeishuNotificationService;
 import com.quantai.model.vo.AlertVO;
 import com.quantai.service.AlertService;
 import com.quantai.service.DataServiceClient;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.LocalTime;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Component
@@ -26,6 +28,7 @@ public class StockScheduler implements CommandLineRunner {
     private final DataServiceClient dataServiceClient;
     private final StockWebSocketHandler webSocketHandler;
     private final WatchService watchService;
+    private final FeishuNotificationService feishuNotifier;
 
     @Override
     public void run(String... args) {
@@ -45,6 +48,9 @@ public class StockScheduler implements CommandLineRunner {
         }
     }
 
+    private int boardPushIndex = 0;
+    private static final String[] BOARD_TYPES = {"all", "main", "chiNext", "star", "bj"};
+
     @Scheduled(fixedRate = 1000)
     public void refreshWatchlistQuotes() {
         if (!isTradingTime()) return;
@@ -52,6 +58,27 @@ public class StockScheduler implements CommandLineRunner {
             List<StockQuote> quotes = stockService.getWatchlist(1L);
             if (!quotes.isEmpty()) {
                 webSocketHandler.pushQuoteUpdate(quotes);
+            }
+            List<Map<String, Object>> indices = dataServiceClient.fetchIndexQuotes();
+            if (indices != null && !indices.isEmpty()) {
+                webSocketHandler.pushIndexUpdate(indices);
+            }
+            // 每秒轮替推送一个板块的股票数据（5秒一圈）
+            String board = BOARD_TYPES[boardPushIndex % BOARD_TYPES.length];
+            boardPushIndex++;
+            Map<String, Object> boardData = dataServiceClient.fetchBoardStocksWithTotal(board, 1, 10);
+            if (boardData != null) {
+                boardData.put("board", board);
+                webSocketHandler.pushBoardUpdate(boardData);
+            }
+            // 热点/概念/概况每5秒推送一次（变动频率低，无需每秒拉）
+            if (boardPushIndex % 5 == 0) {
+                List<Map<String, Object>> hotBoards = dataServiceClient.fetchHotBoards();
+                if (hotBoards != null) webSocketHandler.pushHotBoardUpdate(hotBoards);
+                List<Map<String, Object>> hotConcepts = dataServiceClient.fetchHotConcepts();
+                if (hotConcepts != null) webSocketHandler.pushHotConceptUpdate(hotConcepts);
+                Map<String, Object> overview = dataServiceClient.fetchMarketOverview();
+                if (overview != null) webSocketHandler.pushMarketUpdate(overview);
             }
         } catch (Exception e) {
             log.error("定时刷新行情失败", e);
@@ -74,6 +101,8 @@ public class StockScheduler implements CommandLineRunner {
             if (!alerts.isEmpty()) {
                 for (AlertVO alert : alerts) {
                     webSocketHandler.pushAlert(alert);
+                    feishuNotifier.notifyAbnormalAlert(alert.getCode(), alert.getName(),
+                            alert.getAlertType(), alert.getDescription());
                 }
                 log.info("发现{}条异动预警", alerts.size());
             }

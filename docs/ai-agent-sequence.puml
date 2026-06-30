@@ -1,0 +1,132 @@
+@startuml AI多Agent协同分析时序图
+!theme plain
+skinparam participant {
+  BorderColor #409eff
+  BorderThickness 1
+  FontSize 13
+}
+skinparam sequence {
+  ArrowColor #333
+  MessageFontSize 12
+  LifeLineBorderColor #999
+}
+skinparam note {
+  FontSize 11
+}
+skinparam actorFontSize 14
+
+actor ":Vue前端" as Frontend
+participant ":Controller" as Controller
+participant ":Redis缓存" as Redis
+participant ":分析编排\nService" as Orchestrator
+participant ":DeepSeek\nLLM" as LLM
+participant ":Python\n数据网关" as DataGateway
+
+== 分支一：一键分析 ==
+
+Frontend -> Controller ++: POST /api/agent/analyze/{stockCode}
+
+Controller -> Redis ++: 查询 key=stock:{stockCode}
+Redis --> Controller --: 返回（命中/未命中）
+
+alt 命中
+    Controller -> Frontend --: 直接返回缓存结果
+    Frontend -> Frontend: 渲染买入/持有/卖出建议
+else 未命中
+    Controller -> Orchestrator ++: 开始分析
+
+    Orchestrator -> Orchestrator: CompletableFuture\n并行启动两个任务
+
+    par 并行分析
+        group 任务A：新闻情感分析
+            Orchestrator -> LLM ++: 新闻情感分析
+            LLM --> Orchestrator --: POSITIVE/NEGATIVE/NEUTRAL + score
+        end
+        group 任务B：技术面Agent（本地计算，不调LLM）
+            Orchestrator -> DataGateway ++: 获取近20日K线
+            DataGateway --> Orchestrator --: K线数组
+            Orchestrator -> Orchestrator: 线性回归判趋势\n计算MA5/10/20偏离度\n计算5日均量比\n识别K线形态\n统计连涨天数
+        end
+    end
+
+    Orchestrator -> Orchestrator: allOf 等待两个任务完成
+
+    Orchestrator -> LLM ++: 舆情结果+技术面结果\n要求综合输出交易建议JSON
+
+    alt LLM调用成功
+        LLM --> Orchestrator --: {action, confidence,\nreason, riskWarning}
+        Orchestrator -> Orchestrator: 校验 action∈[BUY,SELL,HOLD]\nconfidence∈[HIGH,MEDIUM,LOW]\n无效则重置
+
+        Orchestrator -> Redis ++: 写入结果，TTL=5min
+        Redis --> Orchestrator --: OK
+
+        Orchestrator --> Controller --: 返回结果
+        Controller -> Frontend --: 建议+置信度+理由+风险提示
+        Frontend -> Frontend: 渲染分析结果
+    else LLM调用失败
+        Orchestrator -> Orchestrator: 规则引擎兜底\n趋势向上且价格>MA5 → BUY\n趋势向下 → SELL\n其他 → HOLD\n置信度固定LOW
+        Orchestrator --> Controller --: 规则兜底结果\n（标记"AI不可用"）
+        Controller -> Frontend --: 降级结果
+        Frontend -> Frontend: 渲染降级结果
+    end
+end
+
+== 分支二：ReAct模式（用户自然语言问题） ==
+
+Frontend -> Controller ++: POST /api/agent/react\n携带用户问题
+Controller -> DataGateway ++: 获取该股票实时行情
+DataGateway --> Controller --: 现价、涨跌幅等
+
+Controller -> Orchestrator ++: System Prompt（5个工具描述）\n+ 用户问题 + 行情数据
+
+loop 最多10轮
+    Orchestrator -> LLM ++: 当前对话历史
+    LLM --> Orchestrator --: Thought + Action\n（工具名+参数JSON）
+    Orchestrator -> Orchestrator: 正则提取Action JSON
+
+    alt 输出 Final → 跳出循环
+    else 工具名不存在
+        Orchestrator -> Orchestrator: 错误提示追加到对话历史
+    else 工具名存在
+        Orchestrator -> DataGateway ++: 调用对应工具\n（行情/K线/资金流向/新闻）
+        DataGateway --> Orchestrator --: 工具结果（>500字截断）
+        Orchestrator -> Orchestrator: Observation追加到对话历史
+    end
+
+    alt 轮数 ≥ 10
+        Orchestrator -> Orchestrator: 超时终止
+    end
+end
+
+Orchestrator --> Controller --: 最终分析+建议+推理轨迹
+Controller -> Frontend --: 结果
+Frontend -> Frontend: 展示完整推理过程\n（Thought→Action→Observation）
+
+== 分支三：AI财报解读 ==
+
+Frontend -> Controller ++: GET /api/stock/finance/analysis/{code}
+Controller -> Redis ++: 查询 finance:{code}
+Redis --> Controller --: 返回
+
+alt 命中
+    Controller -> Frontend --: 返回缓存报告
+else 未命中
+    Controller -> DataGateway ++: GET /api/stock/finance?code=xxx
+    DataGateway -> DataGateway: 查内存缓存（10min TTL）
+    DataGateway -> DataGateway: 未命中则调AKShare\nstock_financial_abstract
+    DataGateway --> Controller --: 财务数据JSON
+
+    Controller -> Controller: 80+指标筛选22个关键指标\n按报告期排版
+
+    Controller -> LLM ++: 财务数据+分析维度要求
+    LLM --> Controller --: Markdown分析报告
+
+    Controller -> Redis ++: 写入结果，TTL=1h
+    Redis --> Controller --: OK
+
+    Controller -> Frontend --: 报告
+    Frontend -> Frontend: Markdown渲染器展示
+end
+
+footer 分析结果不构成投资建议
+@enduml

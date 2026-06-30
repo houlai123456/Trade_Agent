@@ -2,7 +2,7 @@
   <div class="dashboard">
     <!-- 指数行情 -->
     <div class="index-bar">
-      <div v-for="idx in indices" :key="idx.code" class="index-card" @click="goToStock(idx.code)">
+      <div v-for="idx in indices" :key="idx.code" class="index-card" @click="showIndexChart(idx)">
         <div class="index-name">{{ idx.name }}</div>
         <div class="index-price" :class="priceClass(idx.change_percent)">
           {{ idx.current_price?.toFixed(2) }}
@@ -89,10 +89,6 @@
           <span class="ov-label">总成交额</span>
           <span class="ov-value">{{ fmtAmount(overview.total_amount) }}</span>
         </div>
-        <div class="overview-item">
-          <span class="ov-label">总家数</span>
-          <span class="ov-value">{{ overview.total || 0 }}</span>
-        </div>
       </div>
     </el-card>
 
@@ -104,7 +100,6 @@
         </el-button>
       </div>
     </div>
-
 
     <!-- 板块行情 -->
     <el-card shadow="never" class="board-card">
@@ -121,7 +116,7 @@
             <span class="board-count">{{ boardTotals[b.key] }}</span>
           </span>
           <el-tooltip content="点击列头排序" placement="right">
-            <el-icon style="margin-left: auto; color: #909399; cursor: help;"><InfoFilled /></el-icon>
+            <el-icon style="margin-left: auto; color: var(--el-text-color-secondary); cursor: help;"><InfoFilled /></el-icon>
           </el-tooltip>
         </div>
       </template>
@@ -215,7 +210,6 @@ import {
 import * as echarts from 'echarts'
 
 const router = useRouter()
-let refreshTimer = null
 
 const loading = ref(false)
 const indices = ref([])
@@ -277,26 +271,61 @@ onMounted(async () => {
     loadBoard(),
     loadWatchlistSet(),
   ])
-  // 后台加载其他板块的数量（不阻塞页面渲染）
-  loadAllBoardTotals()
-  // 交易时段自动刷新（30秒，无loading闪烁）
-  function isTradingTime() {
-    const now = new Date()
-    const h = now.getHours(), m = now.getMinutes()
-    const dow = now.getDay()
-    if (dow === 0 || dow === 6) return false // 周末休市
-    const t = h * 100 + m
-    return (t >= 930 && t <= 1130) || (t >= 1300 && t <= 1500)
-  }
-  if (isTradingTime()) {
-    refreshTimer = setInterval(silentRefresh, 30000)
-  }
+  // 加载全部板块数量（不阻塞）
+  boards.filter(b => b.key !== activeBoard.value).forEach(b => {
+    getBoardStocks(b.key, 1, 1).then(res => {
+      if (res && Array.isArray(res.data)) boardTotals.value[b.key] = res.total || 0
+      else if (res?.data && Array.isArray(res.data.data)) boardTotals.value[b.key] = res.data.total || 0
+    }).catch(() => {})
+  })
+  // 监听 WebSocket 实时推送（全部数据由WebSocket驱动，无需轮询）
+  window.addEventListener('index-update', onIndexUpdate)
+  window.addEventListener('board-update', onBoardUpdate)
+  window.addEventListener('hot-board-update', onHotBoardUpdate)
+  window.addEventListener('hot-concept-update', onHotConceptUpdate)
+  window.addEventListener('market-update', onMarketUpdate)
 })
 
 onBeforeUnmount(() => {
   chartInstance?.dispose()
-  if (refreshTimer) clearInterval(refreshTimer)
+  window.removeEventListener('index-update', onIndexUpdate)
+  window.removeEventListener('board-update', onBoardUpdate)
+  window.removeEventListener('hot-board-update', onHotBoardUpdate)
+  window.removeEventListener('hot-concept-update', onHotConceptUpdate)
+  window.removeEventListener('market-update', onMarketUpdate)
 })
+
+function onIndexUpdate(e) {
+  if (e.detail && Array.isArray(e.detail)) {
+    indices.value = e.detail
+  }
+}
+
+function onBoardUpdate(e) {
+  const d = e.detail
+  if (!d || !d.board) return
+  const board = d.board
+  const dataArr = d.data
+  if (Array.isArray(dataArr)) {
+    boardTotals.value[board] = d.total || 0
+    // 只在第一页时更新表格，翻页后不受WebSocket干扰
+    if (board === activeBoard.value && boardPage.value === 1) {
+      boardStocks.value = dataArr
+    }
+  }
+}
+
+function onHotBoardUpdate(e) {
+  if (Array.isArray(e.detail)) hotBoards.value = e.detail
+}
+
+function onHotConceptUpdate(e) {
+  if (Array.isArray(e.detail)) hotConcepts.value = e.detail
+}
+
+function onMarketUpdate(e) {
+  if (e.detail) overview.value = e.detail
+}
 
 async function loadIndices() {
   try { indices.value = await getIndexQuotes() } catch (e) {}
@@ -309,7 +338,6 @@ async function loadMarketOverview() {
 async function loadHotBoards() {
   hotBoardLoading.value = true
   conceptLoading.value = true
-  // 分别加载，互不影响
   try {
     hotBoards.value = await getHotBoards()
   } catch (e) {
@@ -326,19 +354,8 @@ async function loadHotBoards() {
   }
 }
 
-// 静默刷新（不触发loading，板块表格也一起更新）
-async function silentRefresh() {
-  await Promise.allSettled([
-    loadIndices(),
-    loadMarketOverview(),
-    getHotBoards().then(d => hotBoards.value = d).catch(() => {}),
-    getHotConcepts().then(d => hotConcepts.value = d).catch(() => {}),
-    loadBoard(),
-  ])
-}
-
-async function loadBoard(page) {
-  boardLoading.value = true
+async function loadBoard(page, silent) {
+  if (!silent) boardLoading.value = true
   try {
     const p = page || boardPage.value
     const res = await getBoardStocks(activeBoard.value, p, boardPageSize.value, sortedBy.value, sortOrder.value)
@@ -362,23 +379,8 @@ async function loadBoard(page) {
     boardStocks.value = []
     boardTotals.value[activeBoard.value] = 0
   } finally {
-    boardLoading.value = false
+    if (!silent) boardLoading.value = false
   }
-}
-
-async function loadAllBoardTotals() {
-  const allTypes = ['all', 'main', 'chiNext', 'star', 'bj']
-  await Promise.all(allTypes.map(b =>
-    getBoardStocks(b, 1, 1)
-      .then(res => {
-        if (res && Array.isArray(res.data)) {
-          boardTotals.value[b] = res.total || 0
-        } else if (res && res.data && Array.isArray(res.data.data)) {
-          boardTotals.value[b] = res.data.total || 0
-        }
-      })
-      .catch(() => { boardTotals.value[b] = 0 })
-  ))
 }
 
 async function switchBoard(key) {
@@ -388,6 +390,14 @@ async function switchBoard(key) {
   sortOrder.value = null
   boardPage.value = 1
   await loadBoard(1)
+  if (!boardTotals.value[key]) {
+    getBoardStocks(key, 1, 1)
+      .then(res => {
+        if (res && Array.isArray(res.data)) boardTotals.value[key] = res.total || 0
+        else if (res?.data && Array.isArray(res.data.data)) boardTotals.value[key] = res.data.total || 0
+      })
+      .catch(() => {})
+  }
 }
 
 async function handleRefresh() {
@@ -427,7 +437,6 @@ function goToStock(code) {
   router.push(`/stock/${code}`)
 }
 
-// 指数分时图
 async function showIndexChart(idx) {
   chartDialog.value = {
     visible: true,
@@ -455,15 +464,7 @@ async function renderChart(code) {
     const times = data.map((d) => d.time.slice(11, 16))
     const prices = data.map((d) => d.price)
     const vols = data.map((d) => d.volume || 0)
-
-    // 计算基准价（开盘价）
     const basePrice = prices[0]
-    const maxPrice = Math.max(...prices)
-    const minPrice = Math.min(...prices)
-    const priceRange = maxPrice - minPrice || 1
-
-    // 计算涨跌幅百分比数据
-    const changePcts = prices.map((p) => ((p - basePrice) / basePrice * 100))
 
     chartInstance.setOption({
       tooltip: {
@@ -483,45 +484,16 @@ async function renderChart(code) {
         { left: '6%', right: '5%', top: '78%', height: '16%' },
       ],
       xAxis: [
-        {
-          type: 'category',
-          data: times,
-          boundaryGap: false,
-          axisLine: { onZero: false },
-          axisLabel: { fontSize: 11, interval: Math.max(1, Math.floor(times.length / 8)) },
-        },
-        {
-          type: 'category',
-          data: times,
-          gridIndex: 1,
-          boundaryGap: false,
-          axisLabel: { show: false },
-          splitLine: { show: false },
-        },
+        { type: 'category', data: times, boundaryGap: false, axisLabel: { fontSize: 11, interval: Math.max(1, Math.floor(times.length / 8)) } },
+        { type: 'category', data: times, gridIndex: 1, boundaryGap: false, axisLabel: { show: false }, splitLine: { show: false } },
       ],
       yAxis: [
-        {
-          type: 'value',
-          scale: true,
-          splitNumber: 4,
-          axisLabel: {
-            formatter: (v) => v.toFixed(0),
-          },
-        },
-        {
-          type: 'value',
-          gridIndex: 1,
-          splitNumber: 3,
-          axisLabel: { formatter: (v) => fmtVol(v) },
-        },
+        { type: 'value', scale: true, splitNumber: 4, axisLabel: { formatter: (v) => v.toFixed(0) } },
+        { type: 'value', gridIndex: 1, splitNumber: 3, axisLabel: { formatter: (v) => fmtVol(v) } },
       ],
       series: [
         {
-          name: '价格',
-          type: 'line',
-          data: prices,
-          smooth: true,
-          symbol: 'none',
+          type: 'line', data: prices, smooth: true, symbol: 'none',
           lineStyle: { width: 2, color: prices[0] <= prices[prices.length - 1] ? '#ef5350' : '#26a69a' },
           areaStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -529,23 +501,9 @@ async function renderChart(code) {
               { offset: 1, color: prices[0] <= prices[prices.length - 1] ? 'rgba(239,83,80,0.02)' : 'rgba(38,166,154,0.02)' },
             ]),
           },
-          markLine: {
-            silent: true,
-            data: [{ yAxis: basePrice, label: { formatter: `基准 ${basePrice.toFixed(2)}`, fontSize: 11 } }],
-            lineStyle: { color: '#999', type: 'dashed' },
-          },
+          markLine: { silent: true, data: [{ yAxis: basePrice, label: { formatter: `基准 ${basePrice.toFixed(2)}`, fontSize: 11 } }], lineStyle: { color: '#999', type: 'dashed' } },
         },
-        {
-          name: '成交量',
-          type: 'bar',
-          xAxisIndex: 1,
-          yAxisIndex: 1,
-          data: vols,
-          barMaxWidth: 3,
-          itemStyle: {
-            color: (p) => (p.value > 0 ? '#ef5350' : '#26a69a'),
-          },
-        },
+        { type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: vols, barMaxWidth: 3, itemStyle: { color: (p) => (p.value > 0 ? '#ef5350' : '#26a69a') } },
       ],
     })
   } catch (e) {
@@ -556,8 +514,8 @@ async function renderChart(code) {
 }
 
 function priceColor(p) {
-  if (!p) return '#303133'
-  return p > 0 ? '#ef5350' : p < 0 ? '#26a69a' : '#303133'
+  if (!p) return 'var(--el-text-color-primary)'
+  return p > 0 ? '#ef5350' : p < 0 ? '#26a69a' : 'var(--el-text-color-primary)'
 }
 
 function priceClass(p) {
@@ -589,7 +547,6 @@ function fmtAmount(v) {
   return v.toFixed(0)
 }
 
-// 排序 — 后端全量排序后重新加载
 async function handleBoardSort({ prop, order }) {
   sortedBy.value = prop
   sortOrder.value = order
@@ -612,8 +569,8 @@ async function handleBoardSort({ prop, order }) {
   border-radius: 8px;
   overflow: hidden;
   margin-bottom: 12px;
-  background-color: #fff;
-  border: 1px solid #ebeef5;
+  background-color: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-light);
 }
 .index-card {
   flex: 1;
@@ -621,13 +578,13 @@ async function handleBoardSort({ prop, order }) {
   cursor: pointer;
   transition: background 0.2s;
   text-align: center;
-  border-right: 1px solid #f0f0f0;
+  border-right: 1px solid var(--el-border-color-lighter);
 }
 .index-card:last-child { border-right: none; }
-.index-card:hover { background: #f5f7fa; }
+.index-card:hover { background: var(--el-fill-color-light); }
 .index-name {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-bottom: 4px;
 }
 .index-price {
@@ -659,12 +616,14 @@ async function handleBoardSort({ prop, order }) {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  border-bottom: 1px solid #f5f5f5;
-  border-right: 1px solid #f5f5f5;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  border-right: 1px solid var(--el-border-color-lighter);
   font-size: 13px;
   transition: background 0.15s;
+  cursor: pointer;
 }
-.hotboard-item:hover { background: #fafafa; }
+.hotboard-item:hover { background: var(--el-fill-color-light); }
+html.dark .hotboard-item.top3 { background: rgba(239,83,80,0.12); }
 .hotboard-item.top3 { background: #fff8f8; }
 .hb-rank {
   width: 18px;
@@ -674,8 +633,8 @@ async function handleBoardSort({ prop, order }) {
   border-radius: 3px;
   font-size: 11px;
   font-weight: 700;
-  color: #909399;
-  background: #f0f0f0;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color);
 }
 .hotboard-item.top3 .hb-rank {
   background: #ef5350;
@@ -684,6 +643,7 @@ async function handleBoardSort({ prop, order }) {
 .hb-name {
   flex: 1;
   font-weight: 500;
+  color: var(--el-text-color-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -695,7 +655,7 @@ async function handleBoardSort({ prop, order }) {
 }
 .hb-count {
   font-size: 11px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   min-width: 50px;
   text-align: right;
 }
@@ -717,12 +677,12 @@ async function handleBoardSort({ prop, order }) {
 }
 .ov-label {
   font-size: 13px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .ov-value {
   font-size: 15px;
   font-weight: 700;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .ov-value.up { color: #ef5350; }
 .ov-value.down { color: #26a69a; }
@@ -751,11 +711,6 @@ async function handleBoardSort({ prop, order }) {
   align-items: center;
   gap: 8px;
 }
-.header-subtitle {
-  font-size: 12px;
-  color: #909399;
-  font-weight: normal;
-}
 
 /* 板块标签 */
 .board-tabs {
@@ -763,23 +718,24 @@ async function handleBoardSort({ prop, order }) {
   align-items: center;
   gap: 4px;
   border-bottom: none;
+  flex-wrap: wrap;
 }
 .board-tab {
   padding: 6px 16px;
   cursor: pointer;
   font-size: 14px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   border-radius: 4px 4px 0 0;
   transition: all 0.2s;
   user-select: none;
 }
 .board-tab:hover {
-  color: #409eff;
-  background: #ecf5ff;
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
 }
 .board-tab.active {
   color: #fff;
-  background: #409eff;
+  background: var(--el-color-primary);
   font-weight: 600;
 }
 .board-count {
@@ -791,9 +747,6 @@ async function handleBoardSort({ prop, order }) {
   text-align: center;
   padding: 12px 0 4px;
   font-size: 13px;
-  color: #909399;
-}
-.board-all-loaded {
-  color: #c0c4cc;
+  color: var(--el-text-color-secondary);
 }
 </style>

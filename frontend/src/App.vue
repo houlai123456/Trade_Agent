@@ -1,4 +1,5 @@
 <template>
+  <div class="global-progress" :style="{ width: loadingStore.progress + '%', opacity: loadingStore.progress > 0 ? 1 : 0 }"></div>
   <el-container style="height: 100vh">
     <el-header class="app-header">
       <div class="logo">
@@ -13,6 +14,7 @@
         class="nav-menu"
       >
         <el-menu-item index="/">行情看板</el-menu-item>
+        <el-menu-item index="/lhb">龙虎榜</el-menu-item>
         <el-menu-item index="/ai-chat">AI对话</el-menu-item>
         <el-menu-item index="/news">新闻舆情</el-menu-item>
         <el-menu-item index="/alerts">异动预警</el-menu-item>
@@ -33,14 +35,23 @@
           </template>
           <template #default="{ item }">
             <div class="search-item">
-              <span class="search-code">{{ item.code }}</span>
-              <span class="search-name">{{ item.name }}</span>
+              <template v-if="item.type && item.type !== 'stock'">
+                <el-tag size="small" :type="item.type === 'industry' ? 'primary' : 'warning'" style="margin-right:6px">{{ item.type === 'industry' ? '行业' : '概念' }}</el-tag>
+                <span class="search-name">{{ item.name }}</span>
+              </template>
+              <template v-else>
+                <span class="search-code">{{ item.code }}</span>
+                <span class="search-name">{{ item.name }}</span>
+              </template>
               <el-button type="primary" link size="small" @click.stop="goToDetail(item)" style="margin-left: auto;">
                 详情
               </el-button>
             </div>
           </template>
         </el-autocomplete>
+        <el-button class="theme-toggle" circle @click="toggleTheme" :title="isDark ? '切换亮色' : '切换暗色'">
+          <el-icon><Moon v-if="!isDark" /><Sunny v-else /></el-icon>
+        </el-button>
         <el-dropdown trigger="click" @command="handleUserCommand">
           <div class="user-avatar">
             <el-avatar :size="32" icon="UserFilled" />
@@ -64,17 +75,27 @@
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Search, UserFilled, Wallet } from '@element-plus/icons-vue'
+import { Search, UserFilled, Wallet, Moon, Sunny } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
 import { searchStock } from './api/stock'
 import { createWebSocket } from './utils/websocket'
 import { useAlertStore } from './stores/alert'
 import { useStockStore } from './stores/stock'
+import { useLoadingStore } from './stores/loading'
 
 const route = useRoute()
 const router = useRouter()
 const currentRoute = computed(() => route.path)
+    const loadingStore = useLoadingStore()
 const searchKeyword = ref('')
+
+// 暗色模式
+const isDark = ref(document.documentElement.classList.contains('dark'))
+function toggleTheme() {
+  isDark.value = !isDark.value
+  document.documentElement.classList.toggle('dark')
+  localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
+}
 
 let wsConnection = null
 
@@ -89,11 +110,21 @@ onUnmounted(() => {
 
 function handleWsMessage(data) {
   if (data.type === 'QUOTE_UPDATE') {
-    // 更新自选股行情到store
     const stockStore = useStockStore()
     if (Array.isArray(data.data)) {
       data.data.forEach(q => stockStore.updateQuote(q))
     }
+  } else if (data.type === 'INDEX_UPDATE') {
+    window.__indices = data.data
+    window.dispatchEvent(new CustomEvent('index-update', { detail: data.data }))
+  } else if (data.type === 'BOARD_UPDATE') {
+    window.dispatchEvent(new CustomEvent('board-update', { detail: data.data }))
+  } else if (data.type === 'HOT_BOARD_UPDATE') {
+    window.dispatchEvent(new CustomEvent('hot-board-update', { detail: data.data }))
+  } else if (data.type === 'HOT_CONCEPT_UPDATE') {
+    window.dispatchEvent(new CustomEvent('hot-concept-update', { detail: data.data }))
+  } else if (data.type === 'MARKET_UPDATE') {
+    window.dispatchEvent(new CustomEvent('market-update', { detail: data.data }))
   } else if (data.type === 'ALERT') {
     const alertStore = useAlertStore()
     alertStore.addAlert(data.data)
@@ -122,23 +153,26 @@ function handleUserCommand(path) {
 }
 
 async function handleSearch(query, cb) {
-  if (!query.trim()) {
-    cb([])
-    return
-  }
+  if (!query.trim()) { cb([]); return }
   try {
     const res = await searchStock(query)
-    // Python服务返回 {success, data}，Java后端直接返数组
     const list = Array.isArray(res) ? res : (res.data || [])
-    cb(list.map(r => ({ ...r, value: `${r.code} ${r.name}` })))
-  } catch (e) {
-    cb([])
-  }
+    const boards = res.boards || []
+    const results = [
+      ...list.map(r => ({ ...r, value: `${r.code} ${r.name}`, type: 'stock' })),
+      ...boards.map(b => ({ ...b, value: `[板块] ${b.name}`, type: b.type || 'industry' }))
+    ]
+    cb(results)
+  } catch (e) { cb([]) }
 }
 
 function goToDetail(item) {
   searchKeyword.value = ''
-  router.push(`/stock/${item.code}`)
+  if (item.type && item.type !== 'stock') {
+    router.push(`/board/${item.type}/${encodeURIComponent(item.code || item.name)}`)
+  } else {
+    router.push(`/stock/${item.code}`)
+  }
 }
 </script>
 
@@ -146,11 +180,18 @@ function goToDetail(item) {
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
 
+.global-progress {
+  position: fixed; top: 0; left: 0; height: 2px;
+  background: var(--el-color-primary);
+  z-index: 9999;
+  transition: width 0.3s ease, opacity 0.3s;
+}
+
 .app-header {
   display: flex;
   align-items: center;
-  background: #fff;
-  border-bottom: 1px solid #e4e7ed;
+  background: var(--el-bg-color);
+  border-bottom: 1px solid var(--el-border-color-light);
   padding: 0 20px;
   height: 60px !important;
 }
@@ -178,12 +219,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .logo-text {
   font-size: 20px;
   font-weight: 700;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .logo-sub {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-left: 4px;
 }
 
@@ -207,11 +248,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   transition: background 0.2s;
 }
 .user-avatar:hover {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 }
 
 .app-main {
-  background: #f5f7fa;
+  background: var(--el-bg-color-page);
   padding: 16px;
   height: calc(100vh - 60px);
   overflow-y: auto;
@@ -227,16 +268,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .search-code {
   font-family: monospace;
   font-size: 13px;
-  color: #409eff;
+  color: var(--el-color-primary);
   font-weight: 600;
 }
 
 .search-name {
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .el-autocomplete-suggestion li {
   padding: 6px 12px;
 }
+
+/* 暗色模式辅助类 */
+.text-secondary { color: var(--el-text-color-secondary); }
+.text-primary { color: var(--el-text-color-primary); }
 </style>

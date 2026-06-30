@@ -49,6 +49,12 @@ spring:
           model: deepseek-chat
           temperature: 0.7
 
+# 飞书消息推送
+feishu:
+  app-id: ${FEISHU_APP_ID:}
+  app-secret: ${FEISHU_APP_SECRET:}
+  target-open-id: ${FEISHU_TARGET_OPEN_ID:}
+
 # RAG 配置
 rag:
   aliyun:

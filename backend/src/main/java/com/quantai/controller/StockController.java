@@ -3,6 +3,7 @@ package com.quantai.controller;
 import com.quantai.model.entity.StockInfo;
 import com.quantai.model.entity.StockQuote;
 import com.quantai.model.vo.KlineVO;
+import com.quantai.service.AiAnalysisService;
 import com.quantai.service.DataServiceClient;
 import com.quantai.service.StockService;
 import lombok.RequiredArgsConstructor;
@@ -21,6 +22,7 @@ public class StockController {
 
     private final StockService stockService;
     private final DataServiceClient dataServiceClient;
+    private final AiAnalysisService aiAnalysisService;
 
     /**
      * 诊断端点：验证数据服务是否正常
@@ -171,5 +173,26 @@ public class StockController {
     @GetMapping("/index/intraday/{code}")
     public ResponseEntity<List<Map<String, Object>>> getIndexIntraday(@PathVariable String code) {
         return ResponseEntity.ok(dataServiceClient.fetchIndexIntraday(code));
+    }
+
+    /**
+     * AI财报解读
+     * GET /api/stock/finance/analysis/{code}
+     */
+    @GetMapping("/finance/analysis/{code}")
+    public ResponseEntity<Map<String, String>> analyzeFinance(@PathVariable String code) {
+        String report = aiAnalysisService.analyzeFinance(code);
+        return ResponseEntity.ok(Map.of("code", code, "report", report));
+    }
+
+    /**
+     * AI财报对比
+     * GET /api/stock/finance/compare/{code1}/{code2}
+     */
+    @GetMapping("/finance/compare/{code1}/{code2}")
+    public ResponseEntity<Map<String, String>> analyzeFinanceCompare(
+            @PathVariable String code1, @PathVariable String code2) {
+        String report = aiAnalysisService.analyzeFinanceCompare(code1, code2);
+        return ResponseEntity.ok(Map.of("code1", code1, "code2", code2, "report", report));
     }
 }

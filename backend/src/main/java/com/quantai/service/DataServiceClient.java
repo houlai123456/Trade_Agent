@@ -30,29 +30,37 @@ public class DataServiceClient {
     private static final String PYTHON_SERVICE_URL = "http://localhost:5000";
     private static final int MAX_RETRIES = 2;
     private static final long RETRY_DELAY_MS = 500;
+    private static final int CIRCUIT_BREAKER_THRESHOLD = 3;
+    private static final long CIRCUIT_BREAKER_COOLDOWN_MS = 30000;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
+    private int consecutiveFailures = 0;
+    private long circuitOpenUntil = 0;
 
     /**
      * 带重试的 HTTP GET 请求
      */
     private String getWithRetry(String url) {
+        if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD
+                && System.currentTimeMillis() < circuitOpenUntil) {
+            throw new RuntimeException("断路器已打开，Python服务连续失败" + consecutiveFailures + "次");
+        }
         Exception lastEx = null;
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             try {
-                if (attempt > 0) {
-                    log.info("重试请求 (第{}/{}): {}", attempt, MAX_RETRIES, url);
-                    Thread.sleep(RETRY_DELAY_MS * attempt);
-                }
-                return restTemplate.getForObject(url, String.class);
+                if (attempt > 0) Thread.sleep(RETRY_DELAY_MS * attempt);
+                String result = restTemplate.getForObject(url, String.class);
+                consecutiveFailures = 0;
+                return result;
             } catch (Exception e) {
                 lastEx = e;
-                if (attempt < MAX_RETRIES) {
-                    log.warn("请求失败 (第{}次): {} - {}", attempt + 1, url, e.getMessage());
-                }
             }
         }
-        log.error("请求重试耗尽 ({}次): {}", MAX_RETRIES + 1, url, lastEx);
+        consecutiveFailures++;
+        if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+            circuitOpenUntil = System.currentTimeMillis() + CIRCUIT_BREAKER_COOLDOWN_MS;
+            log.error("断路器打开！Python服务连续{}次失败，暂停30秒", consecutiveFailures);
+        }
         throw new RuntimeException("数据服务请求失败: " + url, lastEx);
     }
 
@@ -224,6 +232,16 @@ public class DataServiceClient {
         }
     }
 
+    public List<Map<String, Object>> fetchHotConcepts() {
+        try {
+            String resp = getWithRetry(PYTHON_SERVICE_URL + "/api/stock/hot-concepts");
+            return extractDataArray(resp);
+        } catch (Exception e) {
+            log.error("获取概念板块失败", e);
+            return Collections.emptyList();
+        }
+    }
+
     /**
      * 获取指数分时数据
      */
@@ -280,6 +298,24 @@ public class DataServiceClient {
             return extractDataArray(resp);
         } catch (Exception e) {
             log.error("搜索股票失败 keyword={}", keyword, e);
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * 获取龙虎榜详情
+     * @param date 日期，格式 yyyy-MM-dd（可选，不传取今日）
+     */
+    public List<Map<String, Object>> fetchLhbDetail(String date) {
+        try {
+            String url = PYTHON_SERVICE_URL + "/api/stock/lhb-detail";
+            if (StrUtil.isNotBlank(date)) {
+                url += "?date=" + date;
+            }
+            String resp = getWithRetry(url);
+            return extractDataArray(resp);
+        } catch (Exception e) {
+            log.error("获取龙虎榜失败 date={}", date, e);
             return Collections.emptyList();
         }
     }

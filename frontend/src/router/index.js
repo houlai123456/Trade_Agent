@@ -41,6 +41,11 @@ const routes = [
     name: 'WatchPage',
     component: () => import('../views/WatchPage.vue'),
   },
+  {
+    path: '/lhb',
+    name: 'LhbList',
+    component: () => import('../views/LhbList.vue'),
+  },
 ]
 
 const router = createRouter({

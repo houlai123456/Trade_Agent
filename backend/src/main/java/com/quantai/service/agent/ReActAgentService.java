@@ -34,6 +34,7 @@ public class ReActAgentService {
     private final List<Tool> tools;
 
     private static final int MAX_ITERATIONS = 10;
+    private static final int MAX_OBSERVATION_LEN = 500;
 
     /* ========== 状态机定义 ========== */
     enum AgentState {
@@ -176,7 +177,10 @@ public class ReActAgentService {
                             .build());
 
                     messages.add(Map.of("role", "assistant", "content", llmResponse));
-                    messages.add(Map.of("role", "system", "content", "Observation: " + observation));
+                    String ctxObs = observation.length() > MAX_OBSERVATION_LEN
+                            ? observation.substring(0, MAX_OBSERVATION_LEN) + "...(已截断)"
+                            : observation;
+                    messages.add(Map.of("role", "system", "content", "Observation: " + ctxObs));
 
                     state = AgentState.OBSERVING;
                     break;

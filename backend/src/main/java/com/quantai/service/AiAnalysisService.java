@@ -35,4 +35,19 @@ public interface AiAnalysisService {
      * @return 情绪分析结果 json格式
      */
     String analyzeSentiment(String title, String content);
+
+    /**
+     * AI财报解读
+     * @param code 股票代码
+     * @return 财报分析报告（Markdown格式）
+     */
+    String analyzeFinance(String code);
+
+    /**
+     * AI财报对比分析
+     * @param code1 第一只股票代码
+     * @param code2 第二只股票代码
+     * @return 对比分析报告（Markdown格式）
+     */
+    String analyzeFinanceCompare(String code1, String code2);
 }

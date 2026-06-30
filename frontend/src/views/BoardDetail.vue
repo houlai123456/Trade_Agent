@@ -27,6 +27,24 @@
       </div>
     </el-card>
 
+    <!-- 板块K线图 -->
+    <el-card class="chart-card" style="margin-top: 12px">
+      <template #header>
+        <div class="card-header">
+          <span>K线图（成份股权均合成）</span>
+          <el-radio-group v-model="klinePeriod" size="small" @change="loadKline">
+            <el-radio-button value="daily">日K</el-radio-button>
+            <el-radio-button value="weekly">周K</el-radio-button>
+            <el-radio-button value="monthly">月K</el-radio-button>
+          </el-radio-group>
+        </div>
+      </template>
+      <div v-loading="klineLoading">
+        <KLineChart v-if="klineData.length" :data="klineData" />
+        <el-empty v-else-if="!klineLoading" description="暂无K线数据（非交易时段可能无数据）" />
+      </div>
+    </el-card>
+
     <el-card class="stock-list-card" style="margin-top: 12px">
       <template #header>
         <div class="card-header">
@@ -67,9 +85,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getBoardIndustryStocks, getBoardConceptStocks, getHotBoards, getHotConcepts } from '../api/stock'
+import { getBoardIndustryStocks, getBoardConceptStocks, getHotBoards, getHotConcepts, getBoardKline } from '../api/stock'
+import KLineChart from '../components/KLineChart.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -80,9 +99,22 @@ const stocks = ref([])
 const boardInfo = ref(null)
 const loading = ref(false)
 
+// K线
+const klineData = ref([])
+const klineLoading = ref(false)
+const klinePeriod = ref('daily')
+
+let refreshTimer = null
+
 onMounted(async () => {
   boardName.value = decodeURIComponent(route.params.name)
   await Promise.all([loadBoardInfo(), loadStocks()])
+  await loadKline()
+  refreshTimer = setInterval(() => loadStocks(true), 30000)
+})
+
+onBeforeUnmount(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
 })
 
 async function loadBoardInfo() {
@@ -93,8 +125,22 @@ async function loadBoardInfo() {
   } catch (e) {}
 }
 
-async function loadStocks() {
-  loading.value = true
+async function loadKline() {
+  if (stocks.value.length === 0) return
+  klineLoading.value = true
+  try {
+    const codes = stocks.value.slice(0, 10).map(s => s.code).join(',')
+    const data = await getBoardKline(codes, klinePeriod.value, 120)
+    klineData.value = Array.isArray(data) ? data : []
+  } catch (e) {
+    klineData.value = []
+  } finally {
+    klineLoading.value = false
+  }
+}
+
+async function loadStocks(silent) {
+  if (!silent) loading.value = true
   try {
     const fn = boardType.value === 'industry' ? getBoardIndustryStocks : getBoardConceptStocks
     const raw = await fn(boardName.value)
@@ -105,7 +151,7 @@ async function loadStocks() {
   } catch (e) {
     stocks.value = []
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
