@@ -4,7 +4,6 @@ server:
 spring:
   application:
     name: trading-helper
-
   # 数据源 - 默认使用H2内存数据库，方便本地启动
   # 切换MySQL时激活mysql profile
   datasource:
@@ -82,6 +81,16 @@ logging:
     com.quantai: debug
     org.springframework.ai: debug
 
+# Actuator / Prometheus
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
 ---
 # MySQL配置 - 通过 --spring.profiles.active=mysql 激活
 spring:
@@ -91,8 +100,8 @@ spring:
   datasource:
     url: jdbc:mysql://localhost:3306/trading_helper?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&createDatabaseIfNotExist=true
     driver-class-name: com.mysql.cj.jdbc.Driver
-    username: root
-    password: 123456789zjw
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:}
   h2:
     console:
       enabled: false

@@ -3,6 +3,7 @@ package com.quantai.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.quantai.config.PromptsConfig;
 import com.quantai.model.dto.TradeIntent;
 import com.quantai.model.entity.StockInfo;
 import com.quantai.model.entity.StockQuote;
@@ -33,6 +34,7 @@ public class TradeAgentService {
     private final TradeService tradeService;
     private final ObjectMapper objectMapper;
     private final RestTemplate restTemplate;
+    private final PromptsConfig promptsConfig;
 
     @Value("${spring.ai.openai.api-key}")
     private String apiKey;
@@ -42,27 +44,6 @@ public class TradeAgentService {
 
     @Value("${spring.ai.openai.chat.options.model:deepseek-chat}")
     private String model;
-
-    private static final String PARSE_PROMPT = """
-            你是一个股票交易指令解析器。分析用户的输入是否为股票买卖指令。
-
-            规则：
-            - 买入指令包含：买、买入、建仓、加仓、购买、进 等关键词
-            - 卖出指令包含：卖、卖出、平仓、减仓、出售、出 等关键词
-            - "茅台"指的是"贵州茅台"，"平安"指的是"中国平安"
-            - quantity是股数（A股1手=100股），如果用户说"1手"则quantity=100，说"1万股"则quantity=10000
-            - 如果quantity不是100的倍数，向上取整到最近的100倍
-            - 如果用户没有指定价格，price为null
-            - stock_name输出完整的股票中文名称
-
-            请严格按以下JSON格式返回，不要包含其他文字：
-
-            交易指令示例：
-            {"trade":true,"action":"BUY","stock_name":"贵州茅台","quantity":100,"price":null}
-
-            非交易指令示例：
-            {"trade":false}
-            """;
 
     /**
      * 解析自然语言消息，提取交易意图
@@ -181,7 +162,7 @@ public class TradeAgentService {
             Map<String, Object> body = Map.of(
                     "model", model,
                     "messages", List.of(
-                            Map.of("role", "system", "content", PARSE_PROMPT),
+                            Map.of("role", "system", "content", promptsConfig.getSystem().getTradeParser()),
                             Map.of("role", "user", "content", userMessage)
                     ),
                     "temperature", 0.1

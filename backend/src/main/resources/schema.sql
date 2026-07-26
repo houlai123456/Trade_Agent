@@ -160,3 +160,30 @@ CREATE TABLE IF NOT EXISTS condition_order (
     INDEX idx_code (code),
     INDEX idx_status (status)
 );
+
+-- 聊天会话
+CREATE TABLE IF NOT EXISTS chat_session (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(64) NOT NULL,
+    title VARCHAR(200),
+    stock_code VARCHAR(20),
+    message_count INT DEFAULT 0,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_session_id (session_id),
+    INDEX idx_update_time (update_time)
+);
+
+-- 聊天消息
+CREATE TABLE IF NOT EXISTS chat_message (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(64) NOT NULL,
+    role VARCHAR(20) NOT NULL,
+    content CLOB NOT NULL,
+    message_type VARCHAR(30),
+    token_count INT DEFAULT 0,
+    metadata_json VARCHAR(500),
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_cm_session_id ON chat_message(session_id);
+CREATE INDEX IF NOT EXISTS idx_cm_create_time ON chat_message(create_time);

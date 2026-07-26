@@ -2,7 +2,10 @@ package com.quantai.service.agent;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.quantai.service.agent.tool.Tool;
+import com.quantai.config.PromptsConfig;
+import com.quantai.model.entity.AgentTrace;
+import com.quantai.service.AgentTraceService;
+import com.quantai.service.agent.tool.ToolRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -13,6 +16,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,7 +35,9 @@ public class ReActAgentService {
 
     private final OpenAiChatModel chatModel;
     private final ObjectMapper objectMapper;
-    private final List<Tool> tools;
+    private final ToolRegistry toolRegistry;
+    private final AgentTraceService traceService;
+    private final PromptsConfig promptsConfig;
 
     private static final int MAX_ITERATIONS = 10;
     private static final int MAX_OBSERVATION_LEN = 500;
@@ -49,36 +55,9 @@ public class ReActAgentService {
 
     /** 构建工具描述（给LLM的System Prompt） */
     private String buildToolDescriptions() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("你是一个A股量化分析助手，可以通过调用工具获取实时数据来分析股票。\n\n");
-        sb.append("可用工具：\n");
-
-        for (Tool tool : tools) {
-            sb.append("- ").append(tool.getName()).append(": ").append(tool.getDescription()).append("\n");
-            Map<String, Object> params = tool.getParameters();
-            if (!params.isEmpty()) {
-                sb.append("  参数：");
-                for (Map.Entry<String, Object> e : params.entrySet()) {
-                    sb.append(e.getKey()).append("=").append(e.getValue()).append(", ");
-                }
-                sb.setLength(sb.length() - 2);
-                sb.append("\n");
-            }
-        }
-
-        sb.append("\n你每次回复必须按以下格式：\n");
-        sb.append("Thought: 写下你当前的想法，打算做什么、为什么\n");
-        sb.append("Action: {\"name\":\"工具名\",\"args\":{\"参数名\":\"参数值\"}}\n\n");
-        sb.append("或者当你已经收集足够信息时：\n");
-        sb.append("Final: {\"analysis\":\"综合分析\",\"suggestion\":\"BUY|SELL|HOLD\",\"confidence\":\"HIGH|MEDIUM|LOW\",\"reason\":\"详细理由\"}\n\n");
-        sb.append("规则：\n");
-        sb.append("- 一次只说一个Thought + 一个Action\n");
-        sb.append("- 不要编造数据，所有数据必须通过工具获取\n");
-        sb.append("- 如果工具返回空数据，告诉用户原因，不要硬编\n");
-        sb.append("- 收集足够信息后再给出Final\n");
-        sb.append("- 最多").append(MAX_ITERATIONS).append("轮工具调用");
-
-        return sb.toString();
+        return promptsConfig.getSystem().getReactAgent()
+                .replace("{tools}", toolRegistry.buildToolDescriptions())
+                .replace("{maxIterations}", String.valueOf(MAX_ITERATIONS));
     }
 
     /**
@@ -87,8 +66,13 @@ public class ReActAgentService {
      * @return 完整的思考轨迹 + 最终答案
      */
     public ReActResult run(String userMessage) {
+        AgentTrace agentTrace = new AgentTrace();
+        agentTrace.setTraceType("REACT");
+        agentTrace.setUserMessage(truncate(userMessage, 100));
+        agentTrace.setStartTime(LocalDateTime.now());
+
         long start = System.currentTimeMillis();
-        List<ReActStep> trace = new ArrayList<>();
+        List<ReActStep> traceSteps = new ArrayList<>();
 
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", buildToolDescriptions()));
@@ -101,6 +85,11 @@ public class ReActAgentService {
         String thought = null;
         String actionJson = null;
         String finalAnswer = null;
+        boolean hasError = false;
+        String errorMsg = null;
+
+        // 收集工具返回数据，供 Reflexion 审查用
+        StringBuilder observationsLog = new StringBuilder();
 
         while (state != AgentState.FINISHED) {
             switch (state) {
@@ -112,7 +101,18 @@ public class ReActAgentService {
                 case THINKING:
                     iteration++;
                     log.info("ReAct 第{}轮", iteration);
-                    llmResponse = callLlm(messages);
+                    try {
+                        llmResponse = callLlm(messages);
+                    } catch (Exception e) {
+                        hasError = true;
+                        errorMsg = "LLM调用异常: " + e.getMessage();
+                        log.error("ReAct LLM调用失败", e);
+                        finalAnswer = promptsConfig.getFallback().getLlmError();
+                        agentTrace.setSnapshotContext(truncate(messages.toString(), 500));
+                        agentTrace.setSnapshotRawResponse(truncate(errorMsg, 500));
+                        state = AgentState.FINISHED;
+                        break;
+                    }
                     state = AgentState.DECIDING;
                     break;
 
@@ -122,18 +122,16 @@ public class ReActAgentService {
                     String finalResult = extractFinal(llmResponse);
 
                     if (finalResult != null) {
-                        // LLM主动给出最终结论
                         finalAnswer = finalResult;
-                        trace.add(ReActStep.builder()
+                        traceSteps.add(ReActStep.builder()
                                 .thought("得出最终结论")
                                 .action("Final")
                                 .observation(finalResult)
                                 .build());
                         state = AgentState.FINISHED;
                     } else if (actionJson == null) {
-                        // LLM没返回Action格式，直接当作回答
                         finalAnswer = llmResponse;
-                        trace.add(ReActStep.builder()
+                        traceSteps.add(ReActStep.builder()
                                 .thought(thought != null ? thought : "直接回答")
                                 .action("Final")
                                 .observation(llmResponse)
@@ -147,30 +145,34 @@ public class ReActAgentService {
 
                 case EXECUTING: {
                     String observation;
+                    String toolName = "unknown";
+                    long toolStart = System.currentTimeMillis();
+                    boolean toolSuccess = true;
+
                     try {
                         Map<String, Object> action = objectMapper.readValue(actionJson,
                                 new TypeReference<Map<String, Object>>() {});
-                        String toolName = (String) action.get("name");
+                        toolName = (String) action.get("name");
 
                         @SuppressWarnings("unchecked")
                         Map<String, Object> args = action.get("args") instanceof Map
                                 ? (Map<String, Object>) action.get("args")
                                 : new LinkedHashMap<>();
 
-                        Tool tool = findTool(toolName);
-                        if (tool == null) {
-                            observation = "错误：找不到工具【" + toolName + "】，可用工具：" + tools.stream().map(Tool::getName).toList();
-                        } else {
-                            log.info("调用工具: {}({})", toolName, args);
-                            observation = tool.execute(args);
-                            log.info("工具返回: {}...", observation.length() > 100 ? observation.substring(0, 100) : observation);
-                        }
+                        log.info("调用工具: {}({})", toolName, args);
+                        observation = toolRegistry.execute(toolName, args);
+                        toolSuccess = !observation.startsWith("错误");
+                        log.info("工具返回: {}...", observation.length() > 100 ? observation.substring(0, 100) : observation);
                     } catch (Exception e) {
                         observation = "执行错误：" + e.getMessage();
+                        toolSuccess = false;
                         log.warn("工具执行失败", e);
                     }
 
-                    trace.add(ReActStep.builder()
+                    long toolDuration = System.currentTimeMillis() - toolStart;
+
+                    observationsLog.append("【").append(toolName).append("】\n").append(observation).append("\n\n");
+                    traceSteps.add(ReActStep.builder()
                             .thought(thought != null ? thought : "")
                             .action(actionJson)
                             .observation(observation)
@@ -180,7 +182,7 @@ public class ReActAgentService {
                     String ctxObs = observation.length() > MAX_OBSERVATION_LEN
                             ? observation.substring(0, MAX_OBSERVATION_LEN) + "...(已截断)"
                             : observation;
-                    messages.add(Map.of("role", "system", "content", "Observation: " + ctxObs));
+                    messages.add(Map.of("role", "system", "content", "【工具返回】" + ctxObs));
 
                     state = AgentState.OBSERVING;
                     break;
@@ -195,28 +197,139 @@ public class ReActAgentService {
                     break;
 
                 case TIMEOUT:
-                    finalAnswer = "{\"analysis\":\"分析超时，未能完成完整的分析流程。请尝试更具体的提问。\",\"suggestion\":\"HOLD\",\"confidence\":\"LOW\",\"reason\":\"分析轮数超限\"}";
+                    finalAnswer = promptsConfig.getFallback().getTimeout();
                     state = AgentState.FINISHED;
                     break;
             }
         }
 
-        // 如果finalAnswer是JSON格式，提取analysis字段作为纯文本返回
         finalAnswer = extractPlainText(finalAnswer);
+
+        // ====== Reflexion 自省审查 ======
+        boolean reflexionPassed = true;
+        String reflexionIssues = null;
+        if (!hasError && observationsLog.length() > 0 && finalAnswer != null && !finalAnswer.isBlank()) {
+            try {
+                String reviewerPrompt = promptsConfig.getReflexion().getReviewer()
+                        .replace("{question}", userMessage)
+                        .replace("{observations}", truncate(observationsLog.toString(), 2000))
+                        .replace("{analysis}", finalAnswer);
+
+                Prompt reflexionPrompt = new Prompt(List.of(
+                        new UserMessage(reviewerPrompt)
+                ));
+                ChatResponse reflexionResponse = chatModel.call(reflexionPrompt);
+                String reflexionRaw = reflexionResponse.getResult().getOutput().getContent();
+                log.debug("Reflexion reviewer response: {}", reflexionRaw);
+
+                // 解析审查结果
+                String json = extractJson(reflexionRaw);
+                if (json != null) {
+                    Map<String, Object> review = objectMapper.readValue(json,
+                            new TypeReference<Map<String, Object>>() {});
+                    Boolean pass = (Boolean) review.get("pass");
+                    if (pass != null && !pass) {
+                        reflexionPassed = false;
+                        reflexionIssues = review.get("issues") != null
+                                ? review.get("issues").toString() : "审查未通过";
+                        String corrected = (String) review.get("corrected");
+                        if (corrected != null && !corrected.isBlank()) {
+                            log.info("Reflexion 修正分析: issues={}", reflexionIssues);
+                            finalAnswer = corrected;
+                        }
+                    } else {
+                        log.info("Reflexion 审查通过");
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Reflexion审查调用失败，使用原始分析: {}", e.getMessage());
+            }
+        }
 
         long duration = System.currentTimeMillis() - start;
         log.info("ReAct完成 共{}轮 耗时={}ms", iteration, duration);
 
+        // 写入追踪记录
+        agentTrace.setEndTime(LocalDateTime.now());
+        agentTrace.setDurationMs(duration);
+        agentTrace.setSuccess(!hasError);
+        agentTrace.setErrorMessage(errorMsg);
+        agentTrace.setTotalRounds(iteration);
+        if (llmResponse != null) {
+            agentTrace.setCompletionTokens(llmResponse.length());
+        }
+        // 粗略估计 prompt tokens（每中文字符约 2 token）
+        agentTrace.setPromptTokens(messages.stream()
+                .mapToInt(m -> m.get("content").length())
+                .sum());
+
+        // 记录 Reflexion 结果
+        if (!reflexionPassed) {
+            agentTrace.setTags(Map.of("reflexion", "corrected", "issues", reflexionIssues != null ? reflexionIssues : ""));
+        } else if (observationsLog.length() > 0 && !hasError) {
+            agentTrace.setTags(Map.of("reflexion", "passed"));
+        }
+
+        // 将 ReActStep 转为 AgentTrace.StepDetail 保存
+        if (!traceSteps.isEmpty()) {
+            java.util.List<AgentTrace.StepDetail> stepDetails = new java.util.ArrayList<>();
+            for (int i = 0; i < traceSteps.size(); i++) {
+                ReActStep s = traceSteps.get(i);
+                AgentTrace.StepDetail detail = new AgentTrace.StepDetail();
+                detail.setRound(i + 1);
+                detail.setThought(s.getThought());
+                detail.setAction(truncate(s.getAction(), 300));
+                // 从 Action JSON 中提取工具名
+                String toolName = "Final";
+                boolean isFinal = "Final".equals(s.getAction());
+                if (!isFinal && s.getAction() != null) {
+                    try {
+                        Map<String, Object> actionMap = objectMapper.readValue(s.getAction(),
+                                new TypeReference<Map<String, Object>>() {});
+                        toolName = (String) actionMap.getOrDefault("name", "unknown");
+                    } catch (Exception ignored) {
+                        toolName = "unknown";
+                    }
+                }
+                detail.setToolName(toolName);
+                detail.setObservationSummary(s.getObservation() != null
+                        ? s.getObservation().substring(0, Math.min(s.getObservation().length(), 200))
+                        : "");
+                detail.setToolSuccess(isFinal || !"unknown".equals(toolName));
+                stepDetails.add(detail);
+            }
+            agentTrace.setSteps(stepDetails);
+        }
+
+        traceService.record(agentTrace);
+
         return ReActResult.builder()
-                .trace(trace)
+                .trace(traceSteps)
                 .finalAnswer(finalAnswer)
                 .totalRounds(iteration)
                 .totalDurationMs(duration)
                 .build();
     }
 
+    /** 从文本中提取JSON对象 */
+    private String extractJson(String text) {
+        if (text == null) return null;
+        text = text.replaceAll("```(?:json)?\\s*|\\s*```", "").trim();
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        if (start >= 0 && end > start) return text.substring(start, end + 1);
+        return null;
+    }
+
+    private String truncate(String s, int maxLen) {
+        if (s == null || s.length() <= maxLen) return s;
+        return s.substring(0, maxLen) + "...(已截断)";
+    }
+
+    private static final int MAX_RETRIES = 2;
+    private static final long RETRY_BASE_DELAY_MS = 500;
+
     private String callLlm(List<Map<String, String>> messages) {
-        // 按角色构建正确的对话消息列表
         List<org.springframework.ai.chat.messages.Message> springMessages = new ArrayList<>();
         for (Map<String, String> msg : messages) {
             String role = msg.get("role");
@@ -231,8 +344,21 @@ public class ReActAgentService {
         }
 
         Prompt prompt = new Prompt(springMessages);
-        ChatResponse response = chatModel.call(prompt);
-        return response.getResult().getOutput().getContent();
+        Exception lastException = null;
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                ChatResponse response = chatModel.call(prompt);
+                return response.getResult().getOutput().getContent();
+            } catch (Exception e) {
+                lastException = e;
+                if (attempt < MAX_RETRIES) {
+                    long delay = RETRY_BASE_DELAY_MS * (1L << attempt);
+                    log.warn("LLM调用失败(第{}次)，{}ms后重试: {}", attempt + 1, delay, e.getMessage());
+                    try { Thread.sleep(delay); } catch (InterruptedException ignored) {}
+                }
+            }
+        }
+        throw new RuntimeException("LLM调用失败，已重试" + MAX_RETRIES + "次: " + lastException.getMessage(), lastException);
     }
 
     private String extractThought(String text) {
@@ -297,59 +423,71 @@ public class ReActAgentService {
         return null;
     }
 
-    private Tool findTool(String name) {
-        for (Tool t : tools) {
-            if (t.getName().equals(name)) return t;
-        }
-        return null;
-    }
-
-    /** 将JSON格式的最终答案转为纯文本（提取analysis字段），前端直接展示 */
+    /** 将最终答案转为纯文本（优先提取analysis字段，失败则清理原始输出） */
     private String extractPlainText(String answer) {
         if (answer == null || answer.isBlank()) return answer;
         String trimmed = answer.trim();
-        // 去代码块标记和leading非JSON前缀（如LLM输出的**等）
         trimmed = trimmed.replaceAll("```(?:json)?\\s*|\\s*```", "").trim();
         int jsonStart = trimmed.indexOf('{');
-        if (jsonStart < 0) return answer;
-        trimmed = trimmed.substring(jsonStart);
+        int jsonEnd = trimmed.lastIndexOf('}');
+        String textAfterJson = "";
 
-        try {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> map = objectMapper.readValue(trimmed, Map.class);
-            Object analysis = map.get("analysis");
-            String text = analysis != null ? analysis.toString() : null;
-
-            // 组合成可读文本
-            StringBuilder sb = new StringBuilder();
-            if (text != null && !text.isBlank()) sb.append(text);
-
-            Object suggestion = map.get("suggestion");
-            if (suggestion != null) {
-                String s = suggestion.toString();
-                String label;
-                if ("BUY".equals(s)) label = "\n\n建议买入";
-                else if ("SELL".equals(s)) label = "\n\n建议卖出";
-                else label = "\n\n建议持有观望";
-                sb.append(label);
-                Object confidence = map.get("confidence");
-                if (confidence != null) {
-                    String c = confidence.toString();
-                    if ("HIGH".equals(c)) sb.append("（信心高）");
-                    else if ("MEDIUM".equals(c)) sb.append("（信心中）");
-                    else sb.append("（信心低）");
-                }
-            }
-
-            Object reason = map.get("reason");
-            if (reason != null && !reason.toString().isBlank()) {
-                sb.append("\n\n").append(reason);
-            }
-
-            String result = sb.toString().trim();
-            return result.isEmpty() ? answer : result;
-        } catch (Exception e) {
-            return answer;
+        // 尝试提取JSON后的纯文本（LLM有时在JSON后面写分析）
+        if (jsonEnd > jsonStart && jsonEnd < trimmed.length() - 1) {
+            textAfterJson = trimmed.substring(jsonEnd + 1).trim();
+            // 去掉"Observation:"等前缀
+            textAfterJson = textAfterJson.replaceFirst("^(Observation|观察|分析)[：:]\\s*", "");
         }
+
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+            String jsonPart = trimmed.substring(jsonStart, jsonEnd + 1);
+            try {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> map = objectMapper.readValue(jsonPart, Map.class);
+                StringBuilder sb = new StringBuilder();
+
+                Object analysis = map.get("analysis");
+                if (analysis != null && !analysis.toString().isBlank()) {
+                    sb.append(analysis.toString());
+                }
+
+                Object suggestion = map.get("suggestion");
+                if (suggestion != null) {
+                    String s = suggestion.toString();
+                    String label;
+                    if ("BUY".equals(s)) label = "\n\n建议买入";
+                    else if ("SELL".equals(s)) label = "\n\n建议卖出";
+                    else label = "\n\n建议持有观望";
+                    sb.append(label);
+                    Object confidence = map.get("confidence");
+                    if (confidence != null) {
+                        String c = confidence.toString();
+                        if ("HIGH".equals(c)) sb.append("（信心高）");
+                        else if ("MEDIUM".equals(c)) sb.append("（信心中）");
+                        else sb.append("（信心低）");
+                    }
+                }
+
+                Object reason = map.get("reason");
+                if (reason != null && !reason.toString().isBlank()) {
+                    sb.append("\n\n").append(reason.toString());
+                }
+
+                String result = sb.toString().trim();
+                if (!result.isEmpty()) return result;
+
+                // JSON中无analysis等字段，使用JSON后的纯文本
+                if (!textAfterJson.isBlank()) return textAfterJson;
+            } catch (Exception ignored) {
+                // JSON解析失败，继续往下走
+            }
+        }
+
+        // 兜底：清理掉JSON块和前缀，返回纯文本部分
+        if (!textAfterJson.isBlank()) return textAfterJson;
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+            return trimmed.substring(jsonEnd + 1).trim();
+        }
+        return answer;
     }
 }

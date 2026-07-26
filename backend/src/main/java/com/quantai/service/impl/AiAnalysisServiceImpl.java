@@ -1,6 +1,9 @@
 package com.quantai.service.impl;
 
+import com.quantai.config.PromptsConfig;
+import com.quantai.model.entity.AgentTrace;
 import com.quantai.model.entity.StockQuote;
+import com.quantai.service.AgentTraceService;
 import com.quantai.service.AiAnalysisService;
 import com.quantai.service.DataServiceClient;
 import com.quantai.service.StockService;
@@ -33,6 +36,8 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
     private final StockService stockService;
     private final DataServiceClient dataServiceClient;
     private final RedisTemplate<String, Object> redisTemplate;
+    private final AgentTraceService traceService;
+    private final PromptsConfig promptsConfig;
 
     // ========== Redis 缓存 Key 前缀 & TTL ==========
     private static final String CACHE_PREFIX = "ai:";
@@ -59,17 +64,65 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
 
     @Override
     public Flux<ChatResponse> chatStream(String message, String stockCode) {
+        long start = System.currentTimeMillis();
         List<Message> messages = buildMessages(message, stockCode);
         Prompt prompt = new Prompt(messages);
-        return chatModel.stream(prompt);
+        return chatModel.stream(prompt)
+                .doFinally(signalType -> {
+                    long duration = System.currentTimeMillis() - start;
+                    AgentTrace trace = new AgentTrace();
+                    trace.setTraceType("CHAT_STREAM");
+                    trace.setStockCode(stockCode);
+                    trace.setUserMessage(truncate(message, 100));
+                    trace.setStartTime(LocalDateTime.now().minusNanos(java.time.Duration.ofMillis(duration).toNanos()));
+                    trace.setEndTime(LocalDateTime.now());
+                    trace.setDurationMs(duration);
+                    trace.setSuccess(signalType != reactor.core.publisher.SignalType.ON_ERROR);
+                    trace.setPromptTokens(message.length());
+                    if (signalType == reactor.core.publisher.SignalType.ON_ERROR) {
+                        trace.setErrorMessage("流式输出异常终止");
+                    }
+                    traceService.record(trace);
+                });
     }
 
     @Override
     public String chat(String message, String stockCode) {
-        List<Message> messages = buildMessages(message, stockCode);
-        Prompt prompt = new Prompt(messages);
-        ChatResponse response = chatModel.call(prompt);
-        return response.getResult().getOutput().getContent();
+        AgentTrace trace = new AgentTrace();
+        trace.setTraceType("CHAT");
+        trace.setStockCode(stockCode);
+        trace.setUserMessage(truncate(message, 100));
+        trace.setStartTime(LocalDateTime.now());
+        trace.setPromptTokens(message.length());
+
+        long start = System.currentTimeMillis();
+        try {
+            List<Message> messages = buildMessages(message, stockCode);
+            Prompt prompt = new Prompt(messages);
+            ChatResponse response = chatModel.call(prompt);
+            String result = response.getResult().getOutput().getContent();
+
+            trace.setEndTime(LocalDateTime.now());
+            trace.setDurationMs(System.currentTimeMillis() - start);
+            trace.setSuccess(true);
+            trace.setCompletionTokens(result != null ? result.length() : 0);
+
+            return result;
+        } catch (Exception e) {
+            trace.setEndTime(LocalDateTime.now());
+            trace.setDurationMs(System.currentTimeMillis() - start);
+            trace.setSuccess(false);
+            trace.setErrorMessage(e.getMessage());
+            trace.setSnapshotRawResponse(truncate(e.getMessage(), 500));
+            throw e;
+        } finally {
+            traceService.record(trace);
+        }
+    }
+
+    private String truncate(String s, int maxLen) {
+        if (s == null || s.length() <= maxLen) return s;
+        return s.substring(0, maxLen) + "...(已截断)";
     }
 
     @Override
@@ -91,20 +144,11 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
         }
 
         String marketContext = buildMarketContext(quote);
-        String prompt = String.format(
-                "你是一位专业的中国A股市场分析师。以下是通过新浪财经API实时获取的行情数据（数据获取时间：%s）：\n\n" +
-                        "%s\n\n" +
-                        "请基于以上真实的实时数据对股票【%s(%s)】进行解读分析，注意：\n" +
-                        "1. 这是从新浪财经API实时拉取的数据，不是你的训练数据\n" +
-                        "2. 今日行情概况\n" +
-                        "3. 技术面简析（涨跌幅、量价关系）\n" +
-                        "4. 短期走势判断\n" +
-                        "5. 风险提示\n\n" +
-                        "请用简洁专业的语言回答，控制在500字以内。",
-                LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")),
-                marketContext,
-                quote.getName(), quote.getCode()
-        );
+        String prompt = promptsConfig.getTemplates().getStockAnalysis()
+                .replace("{fetchTime}", LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
+                .replace("{marketContext}", marketContext)
+                .replace("{stockName}", quote.getName() != null ? quote.getName() : "")
+                .replace("{stockCode}", quote.getCode());
 
         String result = chat(prompt, code);
         cachePut(cacheKey, result, TTL_STOCK);
@@ -158,38 +202,10 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
             return "股票【" + stockName + "(" + code + ")】的财务数据为空。";
         }
 
-        String prompt = String.format("""
-                你是一位资深的A股财务分析师。以下是股票【%s(%s)】最近几个报告期的财务指标数据：
-
-                %s
-
-                请从以下维度进行专业解读（用Markdown格式输出，控制在800字以内）：
-
-                ### 一、营收与利润趋势
-                分析营业总收入和净利润的变化趋势，同比增长情况，环比变化
-
-                ### 二、盈利能力
-                分析毛利率、净利率、净资产收益率(ROE)的水平与变化
-
-                ### 三、财务健康度
-                分析资产负债率、流动比率、速动比率，判断偿债能力和财务风险
-
-                ### 四、现金流状况
-                分析经营/投资/筹资三大现金流情况，判断现金流健康度
-
-                ### 五、运营效率
-                分析存货周转、应收账款周转、总资产周转等指标
-
-                ### 六、综合评价
-                给出整体评价和需要关注的风险点
-
-                注意：
-                - 使用具体数据说话，不要泛泛而谈
-                - 趋势对比要指明变动方向和幅度
-                - 风险提示要具体明确
-                - 不推荐买卖，仅做基本面分析
-                """,
-                stockName, code, financeText.toString());
+        String prompt = promptsConfig.getTemplates().getFinanceAnalysis()
+                .replace("{stockName}", stockName)
+                .replace("{stockCode}", code)
+                .replace("{financeData}", financeText.toString());
 
         String result = chat(prompt, code);
         cachePut(cacheKey, result, TTL_FINANCE);
@@ -216,35 +232,13 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
             return "未能获取财务数据，请检查股票代码。";
         }
 
-        String prompt = String.format("""
-                你是一位资深的A股财务分析师。请对比分析以下两只股票的财务数据。
-
-                【%s(%s)】
-                %s
-
-                【%s(%s)】
-                %s
-
-                请从以下维度进行对比分析（Markdown格式，控制在600字以内）：
-
-                ### 一、营收规模对比
-                比较两家公司的营业总收入和体量差异
-
-                ### 二、盈利能力对比
-                比较毛利率、净利率、ROE
-
-                ### 三、增长对比
-                比较营收和净利润的同比增长
-
-                ### 四、财务健康度对比
-                比较资产负债率、现金流状况
-
-                ### 五、综合评价
-                给出对比结论和各自的优势/风险点
-
-                注意：使用具体数据，客观对比，不推荐买卖。
-                """,
-                n1, code1, f1, n2, code2, f2);
+        String prompt = promptsConfig.getTemplates().getFinanceCompare()
+                .replace("{stockName1}", n1)
+                .replace("{stockCode1}", code1)
+                .replace("{financeData1}", f1)
+                .replace("{stockName2}", n2)
+                .replace("{stockCode2}", code2)
+                .replace("{financeData2}", f2);
 
         String result = chat(prompt, code1);
         cachePut(cacheKey, result, TTL_FINANCE);
@@ -284,17 +278,9 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
             return cached;
         }
 
-        String prompt = String.format(
-                "你是一位金融舆情分析师。请分析以下财经新闻的情绪倾向，以及它影响哪些股票或板块。\n" +
-                        "标题：%s\n内容：%s\n\n" +
-                        "请严格按照以下JSON格式返回（不要包含其他文字）：\n" +
-                        "{\"sentiment\": \"POSITIVE|NEGATIVE|NEUTRAL\", \"score\": 0.0, \"summary\": \"一句话总结\", \"affected_stocks\": [\"股票代码或板块名\"]}\n" +
-                        "sentiment取值：POSITIVE(利好), NEGATIVE(利空), NEUTRAL(中性)\n" +
-                        "score范围：-1.0(极度利空) 到 1.0(极度利好)\n" +
-                        "affected_stocks：列出该新闻可能影响的股票代码或板块名称，如不确定则为空数组\n\n" +
-                        "注意：请严格区分有利好和中性。常规财报发布、例行公告、指数常规涨跌、行业常规数据披露等无明显利好信号的新闻，应判为NEUTRAL，不要因为公司业绩增长就自动判为POSITIVE，只有明确超出预期或包含正面引导的才判为POSITIVE。同理，只有明确提及重大利空（亏损、罚款、诉讼、监管处罚等）才判为NEGATIVE。",
-                title, content
-        );
+        String prompt = promptsConfig.getTemplates().getSentimentAnalysis()
+                .replace("{title}", title != null ? title : "")
+                .replace("{content}", content != null ? content : "");
         String result = chat(prompt, null);
         cachePut(cacheKey, result, TTL_SENTIMENT);
         return result;
@@ -315,31 +301,17 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
     private List<Message> buildMessages(String message, String stockCode) {
         List<Message> messages = new ArrayList<>();
 
-        String systemPrompt = """
-                你是QuantAI智能股票助手，一位专业的中国A股市场分析师。
-                你的核心能力：
-                1. 解读通过新浪财经API实时获取的股票行情数据，提供专业分析
-                2. 回答股票投资相关问题（不提供具体买卖建议）
-                3. 解释金融专业术语和概念
-                4. 分析财经新闻对股市的影响
-
-                回答要求：
-                - 基于我提供的实时数据进行分析，不要依赖你的训练数据中的历史价格
-                - 如果我在对话中提供了实时行情数据，你必须以那个数据为准
-                - 明确指出分析的不确定性
-                - 不承诺收益，不推荐具体买卖时点
-                - 用语专业、简洁、易懂
-                - 涉及数据时给出具体数值
-                """;
-        messages.add(new SystemMessage(systemPrompt));
+        messages.add(new SystemMessage(promptsConfig.getSystem().getChatAssistant()));
 
         if (stockCode != null && !stockCode.trim().isEmpty()) {
             StockQuote quote = stockService.getQuote(stockCode);
             if (quote != null && quote.getCurrentPrice() != null) {
                 String context = buildMarketContext(quote);
-                messages.add(new SystemMessage("【系统】当前关联股票的实时行情数据（来自新浪财经API，获取时间："
-                        + LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-                        + "）：\n" + context));
+                String template = promptsConfig.getSystem().getStockContextInject();
+                String ctxMsg = template
+                        .replace("{fetchTime}", LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
+                        .replace("{marketData}", context);
+                messages.add(new SystemMessage(ctxMsg));
             }
         }
 

@@ -32,7 +32,7 @@
 <script setup>
 import { ref, nextTick } from 'vue'
 import { ArrowDown } from '@element-plus/icons-vue'
-import { reactAgent } from '../api/ai'
+import { smartAnalyze } from '../api/ai'
 
 const props = defineProps({
   stockCode: { type: String, required: true },
@@ -56,9 +56,10 @@ async function send() {
 
   try {
     const name = props.stockName || props.stockCode
-    const res = await reactAgent(`[当前股票: ${name}(${props.stockCode})] ${text}`)
+    const res = await smartAnalyze(`[当前股票: ${name}(${props.stockCode})] ${text}`)
     const data = res.data || res
-    messages.value.push({ role: 'assistant', content: data.finalAnswer || '分析完成，但没有生成结论。' })
+    const answer = data.finalAnswer || data
+    messages.value.push({ role: 'assistant', content: typeof answer === 'string' ? answer : '分析完成，但没有生成结论。' })
   } catch (e) {
     messages.value.push({ role: 'assistant', content: '抱歉，AI 分析出错了，请稍后重试。' })
   } finally {

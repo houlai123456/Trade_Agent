@@ -2,6 +2,7 @@ package com.quantai.rag;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.quantai.config.PromptsConfig;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -25,6 +26,7 @@ public class RagService {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
     private final OpenAiChatModel chatModel;
+    private final PromptsConfig promptsConfig;
 
     @Value("${rag.aliyun.api-key:}")
     private String aliyunApiKey;
@@ -306,14 +308,10 @@ public class RagService {
     }
 
     private String callLlm(String question, String context) {
-        String systemPrompt = "你是专业的股票投资分析助手。请基于提供的新闻信息回答问题。\n"
-                + "要求：\n"
-                + "1. 只基于提供的信息分析，不要编造数据\n"
-                + "2. 如果信息不足以回答，请明确说明\n"
-                + "3. 引用具体信息时标注来源股票名称\n"
-                + "4. 用中文回答，简洁专业";
-
-        String userMessage = "相关信息：\n" + context + "\n\n问题：" + question;
+        String systemPrompt = promptsConfig.getSystem().getRag();
+        String userMessage = promptsConfig.getTemplates().getRagUser()
+                .replace("{context}", context)
+                .replace("{question}", question);
 
         Prompt prompt = new Prompt(List.of(
                 new SystemMessage(systemPrompt),

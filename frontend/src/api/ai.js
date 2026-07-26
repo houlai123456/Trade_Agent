@@ -46,3 +46,8 @@ export function agentCollaborate(stockCode, newsTitle = '', newsContent = '') {
 export function reactAgent(message) {
   return request.post('/agent/react', { message }, { timeout: 60000 })
 }
+
+// 智能分析（自动选模式：Plan-and-Execute 或 ReAct）
+export function smartAnalyze(message) {
+  return request.post('/agent/analyze', { message }, { timeout: 300000 })
+}

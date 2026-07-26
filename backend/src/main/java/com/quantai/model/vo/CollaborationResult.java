@@ -15,6 +15,7 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 public class CollaborationResult {
+    private String sessionId;
     private String stockCode;
     private String stockName;
     private List<AgentStep> steps;   // Agent执行流水线

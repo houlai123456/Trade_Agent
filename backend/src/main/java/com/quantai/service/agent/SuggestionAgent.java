@@ -2,6 +2,9 @@ package com.quantai.service.agent;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.quantai.config.PromptsConfig;
+import com.quantai.model.entity.AgentTrace;
+import com.quantai.service.AgentTraceService;
 import com.quantai.model.vo.MarketAnalysis;
 import com.quantai.model.vo.TradeSuggestion;
 import lombok.RequiredArgsConstructor;
@@ -13,6 +16,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,39 +31,16 @@ public class SuggestionAgent {
 
     private final OpenAiChatModel chatModel;
     private final ObjectMapper objectMapper;
-
-    private static final String SYSTEM_PROMPT = """
-            你是一位专业的中国A股市场分析师，正在参与一个多Agent协作分析流程。
-
-            你的输入包含两部分：
-            1. 【新闻舆情分析】— 最新相关新闻的情绪倾向
-            2. 【市场技术面分析】— 基于实时K线数据的趋势、均线、量能分析
-
-            请综合两部分信息，给出对该股票的交易参考建议。
-
-            要求：
-            - 分析理由不超过300字，简洁专业
-            - 区分短期（1-5天）和中长期（1-3个月）视角
-            - 明确指出不确定性
-            - 不承诺收益
-
-            请严格按以下JSON格式返回（不要包含其他文字）：
-            {
-              "action": "BUY|SELL|HOLD",
-              "confidence": "HIGH|MEDIUM|LOW",
-              "reason": "综合新闻情绪与市场数据的分析理由（markdown格式）",
-              "riskWarning": "风险提示",
-              "suggestionSummary": "一句话总结操作建议"
-            }
-
-            action取值说明：
-            - BUY：新闻偏利好 + 技术面偏强 → 可关注买入
-            - SELL：新闻偏利空 + 技术面偏弱 → 注意风险
-            - HOLD：信号矛盾或方向不明 → 观望
-            """;
+    private final AgentTraceService traceService;
+    private final PromptsConfig promptsConfig;
 
     public TradeSuggestion suggest(String stockCode, String stockName,
                                     String newsAnalysis, MarketAnalysis marketAnalysis) {
+        AgentTrace agentTrace = new AgentTrace();
+        agentTrace.setTraceType("SUGGESTION");
+        agentTrace.setStockCode(stockCode);
+        agentTrace.setStartTime(LocalDateTime.now());
+
         long start = System.currentTimeMillis();
 
         StringBuilder userInput = new StringBuilder();
@@ -90,18 +71,41 @@ public class SuggestionAgent {
             log.debug("LLM原始响应: {}", response);
             TradeSuggestion suggestion = parseResponse(response);
             suggestion = validateSuggestion(suggestion);
+
+            long duration = System.currentTimeMillis() - start;
+            agentTrace.setSuccess(true);
+            agentTrace.setDurationMs(duration);
+            agentTrace.setPromptTokens(userInput.length());
+            agentTrace.setCompletionTokens(response != null ? response.length() : 0);
+
             log.info("交易建议Agent完成 code={} action={} 耗时={}ms",
-                    stockCode, suggestion.getAction(), System.currentTimeMillis() - start);
+                    stockCode, suggestion.getAction(), duration);
             return suggestion;
         } catch (Exception e) {
+            long duration = System.currentTimeMillis() - start;
             log.error("交易建议Agent调用失败 code={}", stockCode, e);
+            agentTrace.setSuccess(false);
+            agentTrace.setErrorMessage(e.getMessage());
+            agentTrace.setSnapshotContext(truncate(userInput.toString(), 500));
+            agentTrace.setSnapshotRawResponse(truncate(e.getMessage(), 500));
             return fallbackSuggestion(marketAnalysis);
+        } finally {
+            agentTrace.setEndTime(LocalDateTime.now());
+            if (agentTrace.getDurationMs() <= 0) {
+                agentTrace.setDurationMs(System.currentTimeMillis() - start);
+            }
+            traceService.record(agentTrace);
         }
+    }
+
+    private String truncate(String s, int maxLen) {
+        if (s == null || s.length() <= maxLen) return s;
+        return s.substring(0, maxLen) + "...(已截断)";
     }
 
     private String callLlm(String userMessage) {
         Prompt prompt = new Prompt(List.of(
-                new SystemMessage(SYSTEM_PROMPT),
+                new SystemMessage(promptsConfig.getSystem().getSuggestionAgent()),
                 new UserMessage(userMessage)
         ));
         ChatResponse response = chatModel.call(prompt);
