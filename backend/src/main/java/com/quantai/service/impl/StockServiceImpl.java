@@ -2,6 +2,7 @@ package com.quantai.service.impl;
 
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.quantai.cache.CacheManager;
 import com.quantai.mapper.StockInfoMapper;
 import com.quantai.mapper.StockKlineMapper;
 import com.quantai.mapper.UserStockMapper;
@@ -30,9 +31,9 @@ import java.util.stream.Collectors;
 public class StockServiceImpl implements StockService {
 
     private static final String QUOTE_CACHE_PREFIX = "stock:quote:";
-    private static final long QUOTE_CACHE_TTL = 1; // 行情1秒缓存（配合1s推送，Python限流1req/s）
+    private static final long QUOTE_CACHE_TTL = 1;
     private static final String KLINE_CACHE_PREFIX = "stock:kline:";
-    private static final long KLINE_CACHE_TTL = 300; // K线5分钟缓存
+    private static final long KLINE_CACHE_TTL = 300;
 
     private final DataServiceClient dataServiceClient;
     private final IndicatorService indicatorService;
@@ -40,6 +41,7 @@ public class StockServiceImpl implements StockService {
     private final StockKlineMapper stockKlineMapper;
     private final UserStockMapper userStockMapper;
     private final RedisTemplate<String, Object> redisTemplate;
+    private final CacheManager cacheManager;
 
     @Override
     public List<StockInfo> searchStock(String keyword) {
@@ -57,21 +59,24 @@ public class StockServiceImpl implements StockService {
     public StockQuote getQuote(String code) {
         if (StrUtil.isBlank(code)) return null;
 
-        // Redis缓存（Redis不可用时降级直接拉取）
-        try {
-            String cacheKey = QUOTE_CACHE_PREFIX + code;
-            StockQuote cached = (StockQuote) redisTemplate.opsForValue().get(cacheKey);
-            if (cached != null) return cached;
-        } catch (Exception e) {
-            log.warn("Redis不可用，跳过缓存读取: {}", e.getMessage());
+        String cacheKey = QUOTE_CACHE_PREFIX + code;
+        StockQuote quote = cacheManager.get(cacheKey, QUOTE_CACHE_TTL,
+                () -> dataServiceClient.fetchQuote(code),
+                StockQuote.class);
+
+        // 补充行业信息（从stock_info表）
+        if (quote != null && quote.getIndustry() == null) {
+            try {
+                StockInfo info = stockInfoMapper.selectOne(
+                    new LambdaQueryWrapper<StockInfo>().eq(StockInfo::getCode, code));
+                if (info != null) {
+                    quote.setIndustry(info.getIndustry());
+                }
+            } catch (Exception e) {
+                log.warn("获取股票行业信息失败: {}", code, e);
+            }
         }
 
-        StockQuote quote = dataServiceClient.fetchQuote(code);
-        if (quote != null) {
-            try {
-                redisTemplate.opsForValue().set(QUOTE_CACHE_PREFIX + code, quote, QUOTE_CACHE_TTL, TimeUnit.SECONDS);
-            } catch (Exception ignored) {}
-        }
         return quote;
     }
 

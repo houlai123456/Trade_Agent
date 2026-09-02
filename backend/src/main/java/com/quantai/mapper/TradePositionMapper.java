@@ -19,6 +19,13 @@ public interface TradePositionMapper extends BaseMapper<TradePosition> {
     TradePosition selectByUserAndCode(@Param("userId") Long userId, @Param("code") String code);
 
     /**
+     * 查询用户指定股票的持仓（悲观锁，FOR UPDATE）
+     * 用于事务内需要修改持仓的场景，防止并发超卖
+     */
+    @Select("SELECT * FROM trade_position WHERE user_id = #{userId} AND code = #{code} FOR UPDATE")
+    TradePosition selectByUserAndCodeForUpdate(@Param("userId") Long userId, @Param("code") String code);
+
+    /**
      * 查询用户所有持仓
      */
     @Select("SELECT * FROM trade_position WHERE user_id = #{userId} AND quantity > 0 ORDER BY update_time DESC")

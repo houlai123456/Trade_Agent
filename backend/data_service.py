@@ -1,6 +1,7 @@
 """
-AKShare 数据服务
+AKShare 数据服务（多数据源容灾版本）
 为Java后端提供股票数据API，端口5000
+支持 AKShare（主源）+ Ashare（备源）自动故障切换
 安装依赖：pip install flask akshare pandas flask-cors
 启动方式：python data_service.py
 """
@@ -18,6 +19,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from board_mappings import _SECTOR_LABEL_MAP, _THS_TO_SECTOR, _CONCEPT_KEYWORDS, _INDUSTRY_KEYWORDS
+from multi_source_manager import get_manager
 
 app = Flask(__name__)
 CORS(app)
@@ -236,12 +238,36 @@ def stock_search():
 @app.route("/api/stock/quote", methods=["GET"])
 @rate_limit
 def stock_quote():
-    """获取实时行情"""
+    """获取实时行情（支持多数据源故障切换）"""
     if not is_cache_ready():
         return jsonify({"success": False, "error": "数据加载中，请稍后重试", "data": []}), 503
     codes_param = request.args.get("codes", "")
     codes = [c.strip() for c in codes_param.split(",") if c.strip()] if codes_param else []
 
+    # 如果指定了股票代码，使用多数据源管理器（支持故障切换）
+    if codes:
+        manager = get_manager()
+        results = []
+        for code in codes:
+            quote_data = manager.get_quote(code)
+            if quote_data:
+                results.append({
+                    "code": quote_data["code"],
+                    "name": quote_data["name"],
+                    "current_price": quote_data["price"],
+                    "open_price": quote_data["open"],
+                    "yesterday_close": quote_data["pre_close"],
+                    "high_price": quote_data["high"],
+                    "low_price": quote_data["low"],
+                    "volume": quote_data["volume"],
+                    "amount": quote_data["amount"],
+                    "change_percent": quote_data["change_percent"],
+                    "change_amount": quote_data["change"],
+                    "data_source": quote_data.get("source", "unknown")  # 标注数据来源
+                })
+        return jsonify({"success": True, "data": results})
+
+    # 如果未指定股票代码，返回缓存的全部行情（AKShare）
     df = get_stock_list()
     if df.empty:
         return jsonify({"success": False, "error": "未获取到数据", "data": []})
@@ -492,7 +518,7 @@ def _aggregate_kline(df, period):
 @app.route("/api/stock/kline", methods=["GET"])
 @rate_limit
 def stock_kline():
-    """获取历史K线
+    """获取历史K线（支持多数据源故障切换）
     参数：code=600519 period=daily|weekly|monthly limit=100
     """
     code = request.args.get("code", "")
@@ -503,35 +529,35 @@ def stock_kline():
         return jsonify({"success": False, "error": "缺少code参数"}), 400
 
     raw_code = strip_exchange(code)
+    stock_code = add_exchange(raw_code)
 
-    period_map = {"daily": "daily", "weekly": "weekly", "monthly": "monthly"}
-    akshare_period = period_map.get(period, "daily")
+    # 使用多数据源管理器
+    manager = get_manager()
 
-    try:
-        # 统一用 stock_zh_a_daily 获取日K数据（Sina源，稳定可靠）
-        # 周K/月K通过对日K聚合实现
-        df = akshare_call(ak.stock_zh_a_daily, symbol=add_exchange(raw_code), adjust="qfq")
-    except Exception as e:
-        logger.error(f"获取K线失败 code={code}: {e}")
-        return jsonify({"success": False, "error": str(e), "data": []})
+    # 计算日期范围（获取更多数据以支持周K/月K聚合）
+    from datetime import datetime, timedelta
+    end_date = datetime.now().strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=365*2)).strftime("%Y%m%d")  # 获取2年数据
 
-    if df.empty:
-        return jsonify({"success": True, "data": []})
+    kline_data = manager.get_kline(stock_code, period, start_date, end_date)
 
-    if akshare_period != "daily":
-        df = _aggregate_kline(df, akshare_period)
+    if not kline_data:
+        logger.error(f"获取K线失败 code={code}")
+        return jsonify({"success": False, "error": "获取K线数据失败", "data": []})
 
-    df = df.tail(limit)
+    # 限制返回条数
+    kline_data = kline_data[-limit:] if len(kline_data) > limit else kline_data
+
     results = []
-    for _, row in df.iterrows():
+    for item in kline_data:
         results.append({
-            "date": str(row.get("date", ""))[:10],
-            "open": safe_float(row.get("open")),
-            "close": safe_float(row.get("close")),
-            "high": safe_float(row.get("high")),
-            "low": safe_float(row.get("low")),
-            "volume": safe_int(row.get("volume")),
-            "amount": safe_float(row.get("amount")),
+            "date": item.get("date", "")[:10],
+            "open": safe_float(item.get("open")),
+            "close": safe_float(item.get("close")),
+            "high": safe_float(item.get("high")),
+            "low": safe_float(item.get("low")),
+            "volume": safe_int(item.get("volume")),
+            "amount": safe_float(item.get("amount")),
         })
 
     return jsonify({"success": True, "data": results})
@@ -1257,7 +1283,81 @@ def warmup_cache():
 
     threading.Thread(target=keep_fresh, daemon=True).start()
 
+
+# ==================== 健康检查接口 ====================
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """
+    健康检查接口
+    返回服务状态、AKShare可用性、缓存状态
+    """
+    health_status = {
+        "status": "ok",
+        "timestamp": time.time(),
+        "service": "data_service",
+        "cache_ready": is_cache_ready(),
+        "checks": {}
+    }
+
+    # 检查1: AKShare 是否可用
+    try:
+        df = ak.stock_zh_a_spot()
+        if df is not None and len(df) > 0:
+            health_status["checks"]["akshare"] = "ok"
+        else:
+            health_status["checks"]["akshare"] = "degraded"
+            health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["checks"]["akshare"] = f"error: {str(e)}"
+        health_status["status"] = "error"
+
+    # 检查2: 缓存状态
+    if _cache["stock_list"] is not None:
+        cache_age = time.time() - _cache["stock_list_time"]
+        health_status["checks"]["cache"] = {
+            "status": "ok",
+            "age_seconds": int(cache_age),
+            "stocks_count": len(_cache["stock_list"])
+        }
+    else:
+        health_status["checks"]["cache"] = {"status": "empty"}
+
+    # 根据状态返回HTTP状态码
+    http_code = 200 if health_status["status"] == "ok" else 503
+    return jsonify(health_status), http_code
+
+
+@app.route('/api/metrics', methods=['GET'])
+def metrics():
+    """
+    简单的指标接口，用于监控
+    """
+    return jsonify({
+        "cache_ready": is_cache_ready(),
+        "cache_stock_count": len(_cache["stock_list"]) if _cache["stock_list"] is not None else 0,
+        "cache_age_seconds": int(time.time() - _cache["stock_list_time"]) if _cache["stock_list"] is not None else -1,
+        "uptime_seconds": int(time.time() - app.config.get("start_time", time.time()))
+    })
+
+
+@app.route('/api/datasource/stats', methods=['GET'])
+def datasource_stats():
+    """
+    多数据源统计接口
+    返回：AKShare 和 Ashare 的成功率、故障切换次数等
+    """
+    manager = get_manager()
+    stats = manager.get_stats()
+    return jsonify({
+        "success": True,
+        "data": stats,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+
+
 if __name__ == "__main__":
-    logger.info("启动AKShare数据服务，端口5000")
+    app.config["start_time"] = time.time()
+    logger.info("启动AKShare数据服务（多数据源容灾版本），端口5000")
+    logger.info("主数据源: AKShare | 备用数据源: Ashare（新浪+腾讯）")
     threading.Thread(target=warmup_cache, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False)

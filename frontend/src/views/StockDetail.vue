@@ -220,6 +220,9 @@
 
     <!-- ===== ReAct Agent 对话 ===== -->
     <ReactChat :stock-code="code" :stock-name="quote?.name" />
+
+    <!-- ===== AI建议历史与风险监控 ===== -->
+    <AgentAdviceHistory v-if="!isIndex" :stock-code="code" />
   </div>
 </template>
 
@@ -237,6 +240,7 @@ import KLineChart from '../components/KLineChart.vue'
 import IntradayChart from '../components/IntradayChart.vue'
 import AICollaboration from '../components/AICollaboration.vue'
 import ReactChat from '../components/ReactChat.vue'
+import AgentAdviceHistory from '../components/AgentAdviceHistory.vue'
 
 const route = useRoute()
 const code = computed(() => route.params.code)

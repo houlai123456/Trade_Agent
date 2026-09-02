@@ -49,6 +49,12 @@ public class StockQuote {
     /** 市盈率 */
     private BigDecimal peRatio;
 
+    /** 市净率 */
+    private BigDecimal pbRatio;
+
+    /** 所属行业 */
+    private String industry;
+
     /** 振幅（%） */
     private BigDecimal amplitude;
 

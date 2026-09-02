@@ -2,6 +2,7 @@ package com.quantai.service.impl;
 
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.quantai.annotation.Idempotent;
 import com.quantai.common.BusinessException;
 import com.quantai.mapper.TradeAccountMapper;
 import com.quantai.mapper.TradeOrderMapper;
@@ -112,7 +113,8 @@ public class TradeServiceImpl implements TradeService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Idempotent(prefix = "buy", key = "#code + ':' + #quantity + ':' + #price", expireTime = 5, message = "请勿重复下单")
+    @Transactional(rollbackFor = Exception.class, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public TradeOrder buyStock(String code, int quantity, BigDecimal price) {
         // ========== 参数校验 ==========
         if (StrUtil.isBlank(code)) {
@@ -133,8 +135,8 @@ public class TradeServiceImpl implements TradeService {
         BigDecimal totalCost = price.multiply(BigDecimal.valueOf(quantity))
                 .setScale(2, RoundingMode.HALF_UP);
 
-        // ========== 账户资金校验 ==========
-        TradeAccount account = accountMapper.selectByUserId(DEFAULT_USER_ID);
+        // ========== 账户资金校验（悲观锁） ==========
+        TradeAccount account = accountMapper.selectByUserIdForUpdate(DEFAULT_USER_ID);
         if (account == null) {
             throw new BusinessException("账户不存在，请先初始化");
         }
@@ -149,8 +151,8 @@ public class TradeServiceImpl implements TradeService {
         BigDecimal newBalance = account.getAvailableBalance().subtract(totalCost);
         accountMapper.updateBalance(DEFAULT_USER_ID, newBalance);
 
-        // 2. 更新或创建持仓
-        TradePosition position = positionMapper.selectByUserAndCode(DEFAULT_USER_ID, code);
+        // 2. 更新或创建持仓（悲观锁）
+        TradePosition position = positionMapper.selectByUserAndCodeForUpdate(DEFAULT_USER_ID, code);
         if (position == null) {
             position = new TradePosition();
             position.setUserId(DEFAULT_USER_ID);
@@ -198,7 +200,8 @@ public class TradeServiceImpl implements TradeService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Idempotent(prefix = "sell", key = "#code + ':' + #quantity + ':' + #price", expireTime = 5, message = "请勿重复下单")
+    @Transactional(rollbackFor = Exception.class, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public TradeOrder sellStock(String code, int quantity, BigDecimal price) {
         // ========== 参数校验 ==========
         if (StrUtil.isBlank(code)) {
@@ -208,8 +211,8 @@ public class TradeServiceImpl implements TradeService {
             throw new BusinessException("卖出数量必须大于0");
         }
 
-        // ========== 检查持仓 ==========
-        TradePosition position = positionMapper.selectByUserAndCode(DEFAULT_USER_ID, code);
+        // ========== 检查持仓（悲观锁） ==========
+        TradePosition position = positionMapper.selectByUserAndCodeForUpdate(DEFAULT_USER_ID, code);
         if (position == null || position.getQuantity() <= 0) {
             throw new BusinessException("未持有该股票，无法卖出");
         }
@@ -239,8 +242,8 @@ public class TradeServiceImpl implements TradeService {
                 .setScale(2, RoundingMode.HALF_UP);
 
         // ========== 执行卖出（事务内） ==========
-        // 1. 增加可用资金
-        TradeAccount account = accountMapper.selectByUserId(DEFAULT_USER_ID);
+        // 1. 增加可用资金（悲观锁）
+        TradeAccount account = accountMapper.selectByUserIdForUpdate(DEFAULT_USER_ID);
         BigDecimal newBalance = account.getAvailableBalance().add(proceeds);
         accountMapper.updateBalance(DEFAULT_USER_ID, newBalance);
 
@@ -313,7 +316,7 @@ public class TradeServiceImpl implements TradeService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public TradeOrder placeOrder(String code, int quantity, BigDecimal price, String direction) {
         if (StrUtil.isBlank(code)) {
             throw new BusinessException("股票代码不能为空");
@@ -346,8 +349,8 @@ public class TradeServiceImpl implements TradeService {
         order.setTradeTime(LocalDateTime.now());
 
         if ("BUY".equals(direction)) {
-            // 校验并冻结资金
-            TradeAccount account = accountMapper.selectByUserId(DEFAULT_USER_ID);
+            // 校验并冻结资金（悲观锁）
+            TradeAccount account = accountMapper.selectByUserIdForUpdate(DEFAULT_USER_ID);
             if (account == null) {
                 throw new BusinessException("账户不存在");
             }
@@ -361,8 +364,8 @@ public class TradeServiceImpl implements TradeService {
                 throw new BusinessException("资金冻结失败");
             }
         } else if ("SELL".equals(direction)) {
-            // 校验并冻结股份
-            TradePosition position = positionMapper.selectByUserAndCode(DEFAULT_USER_ID, code);
+            // 校验并冻结股份（悲观锁）
+            TradePosition position = positionMapper.selectByUserAndCodeForUpdate(DEFAULT_USER_ID, code);
             if (position == null) {
                 throw new BusinessException("未持有该股票");
             }
@@ -380,12 +383,12 @@ public class TradeServiceImpl implements TradeService {
         }
 
         orderMapper.insert(order);
-        log.info("创建挂单成功: direction={}, code={}, quantity={}, price={}", direction, code, quantity, price);
+        log.info("创建挂单成功: direction=, code={}, quantity={}, price={}", direction, code, quantity, price);
         return order;
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public void cancelOrder(Long orderId) {
         TradeOrder order = orderMapper.selectById(orderId);
         if (order == null) {
@@ -396,12 +399,15 @@ public class TradeServiceImpl implements TradeService {
         }
 
         if ("BUY".equals(order.getTradeType())) {
-            // 解冻资金
-            BigDecimal amount = order.getAmount() != null ? order.getAmount() : BigDecimal.ZERO;
-            accountMapper.freezeBalance(DEFAULT_USER_ID, amount, amount.negate());
+            // 解冻资金（悲观锁）
+            TradeAccount account = accountMapper.selectByUserIdForUpdate(DEFAULT_USER_ID);
+            if (account != null) {
+                BigDecimal amount = order.getAmount() != null ? order.getAmount() : BigDecimal.ZERO;
+                accountMapper.freezeBalance(DEFAULT_USER_ID, amount, amount.negate());
+            }
         } else if ("SELL".equals(order.getTradeType())) {
-            // 解冻股份
-            TradePosition position = positionMapper.selectByUserAndCode(DEFAULT_USER_ID, order.getCode());
+            // 解冻股份（悲观锁）
+            TradePosition position = positionMapper.selectByUserAndCodeForUpdate(DEFAULT_USER_ID, order.getCode());
             if (position != null) {
                 positionMapper.updateAvailableQuantity(position.getId(), order.getQuantity());
             }

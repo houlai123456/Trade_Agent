@@ -15,6 +15,7 @@
       >
         <el-menu-item index="/">行情看板</el-menu-item>
         <el-menu-item index="/lhb">龙虎榜</el-menu-item>
+        <el-menu-item index="/active-advices">活跃监控</el-menu-item>
         <el-menu-item index="/ai-chat">AI对话</el-menu-item>
         <el-menu-item index="/news">新闻舆情</el-menu-item>
         <el-menu-item index="/alerts">异动预警</el-menu-item>

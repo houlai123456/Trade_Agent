@@ -1,10 +1,12 @@
 package com.quantai.scheduler;
 
+import com.quantai.annotation.DistributedLock;
 import com.quantai.model.entity.StockQuote;
 import com.quantai.feishu.FeishuNotificationService;
 import com.quantai.model.vo.AlertVO;
 import com.quantai.service.AlertService;
 import com.quantai.service.DataServiceClient;
+import com.quantai.service.RiskMonitorService;
 import com.quantai.service.StockService;
 import com.quantai.service.WatchService;
 import com.quantai.websocket.StockWebSocketHandler;
@@ -29,6 +31,8 @@ public class StockScheduler implements CommandLineRunner {
     private final StockWebSocketHandler webSocketHandler;
     private final WatchService watchService;
     private final FeishuNotificationService feishuNotifier;
+    private final RiskMonitorService riskMonitorService;
+    private final com.quantai.service.BacktestService backtestService;
 
     @Override
     public void run(String... args) {
@@ -86,15 +90,19 @@ public class StockScheduler implements CommandLineRunner {
     }
 
     @Scheduled(fixedRate = 1800000)
+    @DistributedLock(key = "task:refreshKline", waitTime = 1, leaseTime = 1800, failMessage = "K线刷新任务已在其他节点执行")
     public void refreshKlineData() {
         try {
+            log.info("开始刷新K线数据");
             stockService.preloadKlineData();
+            log.info("K线数据刷新完成");
         } catch (Exception e) {
             log.error("定时刷新K线失败", e);
         }
     }
 
     @Scheduled(fixedRate = 120000)
+    @DistributedLock(key = "task:checkAlerts", waitTime = 1, leaseTime = 120, failMessage = "预警检查任务已在其他节点执行")
     public void checkAlerts() {
         try {
             List<AlertVO> alerts = alertService.checkAlerts();
@@ -128,6 +136,51 @@ public class StockScheduler implements CommandLineRunner {
             watchService.checkConditionOrders();
         } catch (Exception e) {
             log.error("定时检查条件单失败", e);
+        }
+    }
+
+    /**
+     * 每日收盘后执行风险检查（16:00）
+     */
+    @Scheduled(cron = "0 0 16 * * ?")
+    @DistributedLock(key = "task:riskCheck", waitTime = 1, leaseTime = 600, failMessage = "风险检查任务已在其他节点执行")
+    public void dailyRiskCheck() {
+        try {
+            log.info("开始执行每日风险检查");
+            riskMonitorService.dailyRiskCheck();
+            log.info("每日风险检查完成");
+        } catch (Exception e) {
+            log.error("每日风险检查失败", e);
+        }
+    }
+
+    /**
+     * 每日凌晨执行7天回测（02:00）
+     */
+    @Scheduled(cron = "0 0 2 * * ?")
+    @DistributedLock(key = "task:backtest7d", waitTime = 1, leaseTime = 1800, failMessage = "7天回测任务已在其他节点执行")
+    public void runBacktest7d() {
+        try {
+            log.info("开始执行7天回测任务");
+            backtestService.runBacktest7d();
+            log.info("7天回测任务完成");
+        } catch (Exception e) {
+            log.error("7天回测任务失败", e);
+        }
+    }
+
+    /**
+     * 每日凌晨执行30天回测（03:00）
+     */
+    @Scheduled(cron = "0 0 3 * * ?")
+    @DistributedLock(key = "task:backtest30d", waitTime = 1, leaseTime = 1800, failMessage = "30天回测任务已在其他节点执行")
+    public void runBacktest30d() {
+        try {
+            log.info("开始执行30天回测任务");
+            backtestService.runBacktest30d();
+            log.info("30天回测任务完成");
+        } catch (Exception e) {
+            log.error("30天回测任务失败", e);
         }
     }
 

@@ -3,9 +3,9 @@ package com.quantai.service.agent;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.quantai.config.PromptsConfig;
-import com.quantai.model.entity.AgentTrace;
-import com.quantai.service.AgentTraceService;
 import com.quantai.service.agent.tool.ToolRegistry;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -14,6 +14,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -36,8 +37,17 @@ public class ReActAgentService {
     private final OpenAiChatModel chatModel;
     private final ObjectMapper objectMapper;
     private final ToolRegistry toolRegistry;
-    private final AgentTraceService traceService;
     private final PromptsConfig promptsConfig;
+
+    // Prometheus 指标
+    private final Counter llmPromptTokensCounter;
+    private final Counter llmCompletionTokensCounter;
+    private final Counter llmTotalTokensCounter;
+    private final Counter llmCallCounter;
+    private final Counter llmErrorCounter;
+    private final Timer llmCallTimer;
+    private final Counter agentRoundsCounter;
+    private final Counter agentToolCallCounter;
 
     private static final int MAX_ITERATIONS = 10;
     private static final int MAX_OBSERVATION_LEN = 500;
@@ -66,11 +76,6 @@ public class ReActAgentService {
      * @return 完整的思考轨迹 + 最终答案
      */
     public ReActResult run(String userMessage) {
-        AgentTrace agentTrace = new AgentTrace();
-        agentTrace.setTraceType("REACT");
-        agentTrace.setUserMessage(truncate(userMessage, 100));
-        agentTrace.setStartTime(LocalDateTime.now());
-
         long start = System.currentTimeMillis();
         List<ReActStep> traceSteps = new ArrayList<>();
 
@@ -108,8 +113,6 @@ public class ReActAgentService {
                         errorMsg = "LLM调用异常: " + e.getMessage();
                         log.error("ReAct LLM调用失败", e);
                         finalAnswer = promptsConfig.getFallback().getLlmError();
-                        agentTrace.setSnapshotContext(truncate(messages.toString(), 500));
-                        agentTrace.setSnapshotRawResponse(truncate(errorMsg, 500));
                         state = AgentState.FINISHED;
                         break;
                     }
@@ -160,6 +163,7 @@ public class ReActAgentService {
                                 : new LinkedHashMap<>();
 
                         log.info("调用工具: {}({})", toolName, args);
+                        agentToolCallCounter.increment();
                         observation = toolRegistry.execute(toolName, args);
                         toolSuccess = !observation.startsWith("错误");
                         log.info("工具返回: {}...", observation.length() > 100 ? observation.substring(0, 100) : observation);
@@ -189,6 +193,7 @@ public class ReActAgentService {
                 }
 
                 case OBSERVING:
+                    agentRoundsCounter.increment();
                     if (iteration >= MAX_ITERATIONS) {
                         state = AgentState.TIMEOUT;
                     } else {
@@ -247,61 +252,8 @@ public class ReActAgentService {
         }
 
         long duration = System.currentTimeMillis() - start;
-        log.info("ReAct完成 共{}轮 耗时={}ms", iteration, duration);
-
-        // 写入追踪记录
-        agentTrace.setEndTime(LocalDateTime.now());
-        agentTrace.setDurationMs(duration);
-        agentTrace.setSuccess(!hasError);
-        agentTrace.setErrorMessage(errorMsg);
-        agentTrace.setTotalRounds(iteration);
-        if (llmResponse != null) {
-            agentTrace.setCompletionTokens(llmResponse.length());
-        }
-        // 粗略估计 prompt tokens（每中文字符约 2 token）
-        agentTrace.setPromptTokens(messages.stream()
-                .mapToInt(m -> m.get("content").length())
-                .sum());
-
-        // 记录 Reflexion 结果
-        if (!reflexionPassed) {
-            agentTrace.setTags(Map.of("reflexion", "corrected", "issues", reflexionIssues != null ? reflexionIssues : ""));
-        } else if (observationsLog.length() > 0 && !hasError) {
-            agentTrace.setTags(Map.of("reflexion", "passed"));
-        }
-
-        // 将 ReActStep 转为 AgentTrace.StepDetail 保存
-        if (!traceSteps.isEmpty()) {
-            java.util.List<AgentTrace.StepDetail> stepDetails = new java.util.ArrayList<>();
-            for (int i = 0; i < traceSteps.size(); i++) {
-                ReActStep s = traceSteps.get(i);
-                AgentTrace.StepDetail detail = new AgentTrace.StepDetail();
-                detail.setRound(i + 1);
-                detail.setThought(s.getThought());
-                detail.setAction(truncate(s.getAction(), 300));
-                // 从 Action JSON 中提取工具名
-                String toolName = "Final";
-                boolean isFinal = "Final".equals(s.getAction());
-                if (!isFinal && s.getAction() != null) {
-                    try {
-                        Map<String, Object> actionMap = objectMapper.readValue(s.getAction(),
-                                new TypeReference<Map<String, Object>>() {});
-                        toolName = (String) actionMap.getOrDefault("name", "unknown");
-                    } catch (Exception ignored) {
-                        toolName = "unknown";
-                    }
-                }
-                detail.setToolName(toolName);
-                detail.setObservationSummary(s.getObservation() != null
-                        ? s.getObservation().substring(0, Math.min(s.getObservation().length(), 200))
-                        : "");
-                detail.setToolSuccess(isFinal || !"unknown".equals(toolName));
-                stepDetails.add(detail);
-            }
-            agentTrace.setSteps(stepDetails);
-        }
-
-        traceService.record(agentTrace);
+        log.info("ReAct完成 共{}轮 耗时={}ms reflexion={}", iteration, duration,
+                !reflexionPassed ? "corrected" : (observationsLog.length() > 0 ? "passed" : "skipped"));
 
         return ReActResult.builder()
                 .trace(traceSteps)
@@ -345,11 +297,39 @@ public class ReActAgentService {
 
         Prompt prompt = new Prompt(springMessages);
         Exception lastException = null;
+
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            Timer.Sample sample = Timer.start();
             try {
+                llmCallCounter.increment();
                 ChatResponse response = chatModel.call(prompt);
+                sample.stop(llmCallTimer);
+
+                // 记录 Token 消耗
+                Usage usage = response.getMetadata().getUsage();
+                if (usage != null) {
+                    Long promptTokens = usage.getPromptTokens();
+                    Long completionTokens = usage.getGenerationTokens();
+                    Long totalTokens = usage.getTotalTokens();
+
+                    if (promptTokens != null) {
+                        llmPromptTokensCounter.increment(promptTokens);
+                    }
+                    if (completionTokens != null) {
+                        llmCompletionTokensCounter.increment(completionTokens);
+                    }
+                    if (totalTokens != null) {
+                        llmTotalTokensCounter.increment(totalTokens);
+                    }
+
+                    log.debug("LLM Token 消耗 - Prompt: {}, Completion: {}, Total: {}",
+                            promptTokens, completionTokens, totalTokens);
+                }
+
                 return response.getResult().getOutput().getContent();
             } catch (Exception e) {
+                sample.stop(llmCallTimer);
+                llmErrorCounter.increment();
                 lastException = e;
                 if (attempt < MAX_RETRIES) {
                     long delay = RETRY_BASE_DELAY_MS * (1L << attempt);

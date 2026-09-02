@@ -24,6 +24,7 @@ import java.util.concurrent.Executors;
 public class RagController {
 
     private final RagService ragService;
+    private final PdfParserService pdfParserService;
     private final ObjectMapper objectMapper;
 
     @PostConstruct
@@ -118,7 +119,7 @@ public class RagController {
         return emitter;
     }
 
-    /** POST /api/rag/upload — 上传文档 */
+    /** POST /api/rag/upload — 上传文档（PDF 走新版解析管道） */
     @PostMapping("/upload")
     public ResponseEntity<Map<String, Object>> upload(@RequestParam("file") MultipartFile file) {
         if (file.isEmpty()) {
@@ -126,39 +127,52 @@ public class RagController {
         }
 
         try {
-            String content;
             String filename = file.getOriginalFilename();
+            Map<String, Object> result;
+
             if (filename != null && filename.toLowerCase().endsWith(".pdf")) {
-                content = extractPdfText(file);
+                PdfParserService.ParsedDocument doc = pdfParserService.parse(file.getInputStream(), filename);
+                if (pdfParserService.isScanned(doc)) {
+                    return ResponseEntity.ok(Map.of("success", false, "error",
+                            "检测到扫描件PDF（无文字层），暂不支持OCR识别，请上传原生电子版PDF"));
+                }
+                result = ragService.ingestPdfDocument(doc);
             } else {
-                content = new String(file.getBytes(), StandardCharsets.UTF_8);
+                String content = new String(file.getBytes(), StandardCharsets.UTF_8);
+                if (content.isBlank()) {
+                    return ResponseEntity.ok(Map.of("success", true, "data",
+                            Map.of("chunks", 0, "message", "文件内容为空")));
+                }
+                int chunks = ragService.ingestDocument(content,
+                        filename != null ? filename : "未命名文件");
+                result = Map.of("chunks", chunks, "message", "索引完成");
             }
 
-            if (content.isBlank()) {
-                return ResponseEntity.ok(Map.of("success", true, "data",
-                        Map.of("chunks", 0, "message", "文件内容为空")));
-            }
-
-            int chunks = ragService.ingestDocument(content,
-                    filename != null ? filename : "未命名文件");
-            return ResponseEntity.ok(Map.of("success", true, "data",
-                    Map.of("chunks", chunks, "message", "索引完成")));
+            return ResponseEntity.ok(Map.of("success", true, "data", result));
         } catch (Exception e) {
             log.error("文档上传失败", e);
             return ResponseEntity.ok(Map.of("success", false, "error", "文档处理失败: " + e.getMessage()));
         }
     }
 
-    private String extractPdfText(MultipartFile file) throws Exception {
-        StringBuilder text = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                text.append(line).append("\n");
-            }
+    /** GET /api/rag/page — 按文档+页码回读原文（Agent readPage 工具后端支持） */
+    @GetMapping("/page")
+    public ResponseEntity<Map<String, Object>> readPage(@RequestParam String docId, @RequestParam int page) {
+        String text = ragService.readPage(docId, page);
+        if (text == null) {
+            return ResponseEntity.ok(Map.of("success", false, "error", "文档不存在或页码超出范围"));
         }
-        return text.toString();
+        return ResponseEntity.ok(Map.of("success", true, "data", Map.of("docId", docId, "page", page, "content", text)));
+    }
+
+    /** GET /api/rag/table — 抽取某页表格内容 */
+    @GetMapping("/table")
+    public ResponseEntity<Map<String, Object>> extractTable(@RequestParam String docId, @RequestParam int page) {
+        String table = ragService.extractTable(docId, page);
+        if (table == null) {
+            return ResponseEntity.ok(Map.of("success", false, "error", "该页未检测到表格内容"));
+        }
+        return ResponseEntity.ok(Map.of("success", true, "data", Map.of("docId", docId, "page", page, "table", table)));
     }
 
     private String escapeJson(String s) {

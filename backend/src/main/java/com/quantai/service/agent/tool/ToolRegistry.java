@@ -26,6 +26,7 @@ public class ToolRegistry {
             register(tool);
         }
         log.info("ToolRegistry initialized: {} tools registered", registry.size());
+        log.info("Registered tools: {}", getToolNames());
     }
 
     private void register(Tool tool) {

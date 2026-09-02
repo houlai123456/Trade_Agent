@@ -4,23 +4,15 @@ server:
 spring:
   application:
     name: trading-helper
-  # 数据源 - 默认使用H2内存数据库，方便本地启动
-  # 切换MySQL时激活mysql profile
+  # 数据源 - MySQL
   datasource:
-    url: jdbc:h2:file:./data/trading_helper;DB_CLOSE_DELAY=-1;MODE=MySQL;AUTO_RECONNECT=TRUE
-    driver-class-name: org.h2.Driver
-    username: sa
-    password:
-  h2:
-    console:
-      enabled: true
-      path: /h2-console
+    url: jdbc:mysql://localhost:3306/trading_helper?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: ${MYSQL_USERNAME:trade_user}
+    password: ${MYSQL_PASSWORD:your_password_here}
   sql:
     init:
-      mode: always
-      schema-locations: classpath:schema.sql
-      data-locations: classpath:data.sql
-      continue-on-error: true
+      mode: never  # 改为 never，避免每次启动都重新执行 schema.sql
 
   # Redis配置
   redis:
@@ -38,11 +30,25 @@ spring:
           max-idle: 8
           min-idle: 0
 
+  # Redisson 分布式锁配置
+  redisson:
+    enabled: true
+    config: |
+      singleServerConfig:
+        address: "redis://localhost:6379"
+        connectionPoolSize: 64
+        connectionMinimumIdleSize: 10
+        idleConnectionTimeout: 10000
+        timeout: 3000
+        connectTimeout: 10000
+        retryAttempts: 3
+        retryInterval: 1500
+
   # Spring AI - DeepSeek (OpenAI兼容接口)
   ai:
     openai:
       base-url: https://api.deepseek.com
-      api-key: ${DEEPSEEK_API_KEY:sk-placeholder}
+      api-key: ${DEEPSEEK_API_KEY:your_deepseek_key}
       chat:
         options:
           model: deepseek-chat
@@ -81,6 +87,28 @@ logging:
     com.quantai: debug
     org.springframework.ai: debug
 
+# Resilience4j 熔断器配置
+resilience4j:
+  circuitbreaker:
+    instances:
+      llm:
+        failure-rate-threshold: 50          # 失败率达到50%触发熔断
+        slow-call-rate-threshold: 50        # 慢调用率达到50%触发熔断
+        slow-call-duration-threshold: 10s   # 慢调用定义：超过10秒
+        sliding-window-type: COUNT_BASED    # 基于计数的滑动窗口
+        sliding-window-size: 10             # 滑动窗口大小：10次请求
+        minimum-number-of-calls: 5          # 最少5次调用后才开始计算失败率
+        wait-duration-in-open-state: 60s    # 熔断器打开后等待60秒再尝试半开
+        permitted-number-of-calls-in-half-open-state: 3  # 半开状态允许3次测试调用
+        automatic-transition-from-open-to-half-open-enabled: true
+        record-exceptions:
+          - java.util.concurrent.TimeoutException
+          - java.io.IOException
+  timelimiter:
+    instances:
+      llm:
+        timeout-duration: 30s               # 默认超时30秒
+
 # Actuator / Prometheus
 management:
   endpoints:
@@ -90,6 +118,12 @@ management:
   metrics:
     tags:
       application: ${spring.application.name}
+
+# JWT配置
+jwt:
+  secret: ${JWT_SECRET:trading-helper-jwt-secret-key-must-be-at-least-256-bits-long-for-HS256}
+  expiration: 7200000          # 2小时 (毫秒)
+  refresh-expiration: 604800000 # 7天 (毫秒)
 
 ---
 # MySQL配置 - 通过 --spring.profiles.active=mysql 激活

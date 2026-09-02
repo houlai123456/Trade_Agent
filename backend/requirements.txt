@@ -3,3 +3,4 @@ Flask-Cors>=4.0
 akshare>=1.14.0
 pandas>=2.0
 requests>=2.31
+redis>=5.0.1

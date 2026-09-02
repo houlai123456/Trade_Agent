@@ -1,9 +1,7 @@
 package com.quantai.service.impl;
 
 import com.quantai.config.PromptsConfig;
-import com.quantai.model.entity.AgentTrace;
 import com.quantai.model.entity.StockQuote;
-import com.quantai.service.AgentTraceService;
 import com.quantai.service.AiAnalysisService;
 import com.quantai.service.DataServiceClient;
 import com.quantai.service.StockService;
@@ -36,7 +34,6 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
     private final StockService stockService;
     private final DataServiceClient dataServiceClient;
     private final RedisTemplate<String, Object> redisTemplate;
-    private final AgentTraceService traceService;
     private final PromptsConfig promptsConfig;
 
     // ========== Redis 缓存 Key 前缀 & TTL ==========
@@ -70,31 +67,13 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
         return chatModel.stream(prompt)
                 .doFinally(signalType -> {
                     long duration = System.currentTimeMillis() - start;
-                    AgentTrace trace = new AgentTrace();
-                    trace.setTraceType("CHAT_STREAM");
-                    trace.setStockCode(stockCode);
-                    trace.setUserMessage(truncate(message, 100));
-                    trace.setStartTime(LocalDateTime.now().minusNanos(java.time.Duration.ofMillis(duration).toNanos()));
-                    trace.setEndTime(LocalDateTime.now());
-                    trace.setDurationMs(duration);
-                    trace.setSuccess(signalType != reactor.core.publisher.SignalType.ON_ERROR);
-                    trace.setPromptTokens(message.length());
-                    if (signalType == reactor.core.publisher.SignalType.ON_ERROR) {
-                        trace.setErrorMessage("流式输出异常终止");
-                    }
-                    traceService.record(trace);
+                    log.info("chatStream完成 code={} 耗时={}ms success={}",
+                            stockCode, duration, signalType != reactor.core.publisher.SignalType.ON_ERROR);
                 });
     }
 
     @Override
     public String chat(String message, String stockCode) {
-        AgentTrace trace = new AgentTrace();
-        trace.setTraceType("CHAT");
-        trace.setStockCode(stockCode);
-        trace.setUserMessage(truncate(message, 100));
-        trace.setStartTime(LocalDateTime.now());
-        trace.setPromptTokens(message.length());
-
         long start = System.currentTimeMillis();
         try {
             List<Message> messages = buildMessages(message, stockCode);
@@ -102,21 +81,13 @@ public class AiAnalysisServiceImpl implements AiAnalysisService {
             ChatResponse response = chatModel.call(prompt);
             String result = response.getResult().getOutput().getContent();
 
-            trace.setEndTime(LocalDateTime.now());
-            trace.setDurationMs(System.currentTimeMillis() - start);
-            trace.setSuccess(true);
-            trace.setCompletionTokens(result != null ? result.length() : 0);
-
+            long duration = System.currentTimeMillis() - start;
+            log.info("chat完成 code={} 耗时={}ms", stockCode, duration);
             return result;
         } catch (Exception e) {
-            trace.setEndTime(LocalDateTime.now());
-            trace.setDurationMs(System.currentTimeMillis() - start);
-            trace.setSuccess(false);
-            trace.setErrorMessage(e.getMessage());
-            trace.setSnapshotRawResponse(truncate(e.getMessage(), 500));
+            long duration = System.currentTimeMillis() - start;
+            log.error("chat失败 code={} 耗时={}ms", stockCode, duration, e);
             throw e;
-        } finally {
-            traceService.record(trace);
         }
     }
 

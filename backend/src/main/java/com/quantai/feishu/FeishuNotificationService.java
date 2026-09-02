@@ -37,4 +37,11 @@ public class FeishuNotificationService {
         String text = String.format("【异动预警】\n%s(%s)\n%s", name, code, detail);
         messageService.sendToMe(text);
     }
+
+    /**
+     * 通用消息发送方法（用于自定义消息）
+     */
+    public void sendMessage(String message) {
+        messageService.sendToMe(message);
+    }
 }

@@ -46,6 +46,11 @@ const routes = [
     name: 'LhbList',
     component: () => import('../views/LhbList.vue'),
   },
+  {
+    path: '/active-advices',
+    name: 'ActiveAdvices',
+    component: () => import('../views/ActiveAdvices.vue'),
+  },
 ]
 
 const router = createRouter({

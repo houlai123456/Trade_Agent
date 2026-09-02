@@ -17,6 +17,13 @@ public interface TradeAccountMapper extends BaseMapper<TradeAccount> {
     TradeAccount selectByUserId(@Param("userId") Long userId);
 
     /**
+     * 根据用户ID查询账户（悲观锁，FOR UPDATE）
+     * 用于事务内需要修改账户余额的场景，防止并发超支
+     */
+    @Select("SELECT * FROM trade_account WHERE user_id = #{userId} FOR UPDATE")
+    TradeAccount selectByUserIdForUpdate(@Param("userId") Long userId);
+
+    /**
      * 更新可用资金（带乐观锁校验，防止并发覆盖）
      */
     @Update("UPDATE trade_account SET available_balance = #{balance}, update_time = NOW() WHERE user_id = #{userId}")

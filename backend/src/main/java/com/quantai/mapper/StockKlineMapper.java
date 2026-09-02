@@ -23,4 +23,8 @@ public interface StockKlineMapper extends BaseMapper<StockKline> {
     List<StockKline> selectLatestKline(@Param("code") String code,
                                        @Param("period") String period,
                                        @Param("limit") int limit);
+
+    @Select("SELECT * FROM stock_kline WHERE code = #{code} AND period = 'daily' " +
+            "AND date = #{date} LIMIT 1")
+    StockKline selectByDate(@Param("code") String code, @Param("date") LocalDate date);
 }

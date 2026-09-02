@@ -3,10 +3,9 @@ package com.quantai.service.agent;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.quantai.config.PromptsConfig;
-import com.quantai.model.entity.AgentTrace;
-import com.quantai.service.AgentTraceService;
 import com.quantai.model.vo.MarketAnalysis;
 import com.quantai.model.vo.TradeSuggestion;
+import com.quantai.service.AgentAdviceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -31,16 +30,11 @@ public class SuggestionAgent {
 
     private final OpenAiChatModel chatModel;
     private final ObjectMapper objectMapper;
-    private final AgentTraceService traceService;
     private final PromptsConfig promptsConfig;
+    private final AgentAdviceService agentAdviceService;
 
     public TradeSuggestion suggest(String stockCode, String stockName,
                                     String newsAnalysis, MarketAnalysis marketAnalysis) {
-        AgentTrace agentTrace = new AgentTrace();
-        agentTrace.setTraceType("SUGGESTION");
-        agentTrace.setStockCode(stockCode);
-        agentTrace.setStartTime(LocalDateTime.now());
-
         long start = System.currentTimeMillis();
 
         StringBuilder userInput = new StringBuilder();
@@ -72,29 +66,30 @@ public class SuggestionAgent {
             TradeSuggestion suggestion = parseResponse(response);
             suggestion = validateSuggestion(suggestion);
 
-            long duration = System.currentTimeMillis() - start;
-            agentTrace.setSuccess(true);
-            agentTrace.setDurationMs(duration);
-            agentTrace.setPromptTokens(userInput.length());
-            agentTrace.setCompletionTokens(response != null ? response.length() : 0);
+            // 保存建议并启用风险监控
+            try {
+                Long adviceId = agentAdviceService.saveAdvice(
+                    stockCode,
+                    stockName,
+                    suggestion,
+                    marketAnalysis,
+                    response
+                );
+                if (adviceId != null) {
+                    log.info("已保存Agent建议并启用风险监控: adviceId={}", adviceId);
+                }
+            } catch (Exception saveEx) {
+                log.error("保存Agent建议失败（不影响返回结果）: stock={}", stockCode, saveEx);
+            }
 
+            long duration = System.currentTimeMillis() - start;
             log.info("交易建议Agent完成 code={} action={} 耗时={}ms",
                     stockCode, suggestion.getAction(), duration);
             return suggestion;
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - start;
-            log.error("交易建议Agent调用失败 code={}", stockCode, e);
-            agentTrace.setSuccess(false);
-            agentTrace.setErrorMessage(e.getMessage());
-            agentTrace.setSnapshotContext(truncate(userInput.toString(), 500));
-            agentTrace.setSnapshotRawResponse(truncate(e.getMessage(), 500));
+            log.error("交易建议Agent调用失败 code={} 耗时={}ms", stockCode, duration, e);
             return fallbackSuggestion(marketAnalysis);
-        } finally {
-            agentTrace.setEndTime(LocalDateTime.now());
-            if (agentTrace.getDurationMs() <= 0) {
-                agentTrace.setDurationMs(System.currentTimeMillis() - start);
-            }
-            traceService.record(agentTrace);
         }
     }
 
